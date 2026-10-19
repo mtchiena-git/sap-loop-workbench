@@ -132,7 +132,8 @@ const SAMPLE_PRD=`# PRD：採購單狀態查詢 API（Pilot）
 外部物流系統需要用採購單號查詢交貨狀態，目前靠人工在 ME23N 查後回報。
 
 ## 2. 目標
-GET /zapi/po/{ebeln} 回傳抬頭、項目、交貨狀態；POST /zapi/po/{ebeln}/note 寫入備註。
+提供外部系統兩個能力：(a) 用採購單號查詢抬頭、項目與交貨狀態；(b) 對一張採購單寫入一筆備註。
+（介面形式、路徑、方法由系統規格階段決定，PRD 不定義。）
 
 ## 3. 使用者
 物流系統（技術使用者）、採購 PM。
@@ -317,6 +318,55 @@ const DEFAULT_FIELDS=()=>[
  {name:'Error',role:'錯誤回應 · 4xx',fields:[
   {label:'錯誤碼',name:'error',type:'enum',len:'',req:true,ex:'PO_NOT_FOUND',rule:'PO_NOT_FOUND/INVALID_EBELN/NO_AUTH/INVALID_TEXT'},
   {label:'訊息',name:'message',type:'string',len:'',req:false,ex:'採購單不存在',rule:''}]}];
+// endpoint table: methods / paths / inputs live here, not in the PRD
+const METHODS=['GET','POST','PUT','PATCH','DELETE'];
+const DEFAULT_ENDPOINTS=()=>[
+ {method:'GET',path:'/po/{ebeln}',summary:'查詢採購單狀態',params:[{name:'ebeln',in:'path',type:'string',len:'10',req:true,desc:'採購單號，10 碼數字'}],body:'',ok:'200',resp:'PoStatus',errors:'400,403,404',auth:'M_BEST_EKO ACTVT 03'},
+ {method:'POST',path:'/po/{ebeln}/note',summary:'新增備註（寫入 ZPO_NOTE）',params:[{name:'ebeln',in:'path',type:'string',len:'10',req:true,desc:'採購單號'}],body:'NoteRequest',ok:'201',resp:'',errors:'400,403,404',auth:'M_BEST_EKO ACTVT 02'}];
+const ERR_DESC={400:'輸入格式錯誤',401:'未認證',403:'無權限',404:'資料不存在',409:'狀態衝突',500:'系統錯誤'};
+function genPaths(eps){return eps.map(e=>{const m=e.method.toLowerCase();const params=e.params.length?`      parameters:\n${e.params.map(p=>`        - { name: ${p.name}, in: ${p.in}, required: ${p.req?'true':'false'}, schema: { type: ${p.type}${p.len?`, maxLength: ${p.len}`:''} }${p.desc?`, description: "${p.desc}"`:''} }`).join('\n')}\n`:'';
+  const body=e.body?`      requestBody:\n        required: true\n        content: { application/json: { schema: { $ref: '#/components/schemas/${e.body}' } } }\n`:'';
+  const ok=e.resp?`        '${e.ok}': { description: 成功, content: { application/json: { schema: { $ref: '#/components/schemas/${e.resp}' } } } }`:`        '${e.ok}': { description: 成功 }`;
+  const errs=(e.errors||'').split(',').map(s=>s.trim()).filter(Boolean).map(c=>`        '${c}': { $ref: '#/components/responses/Err' }  # ${ERR_DESC[c]||''}`).join('\n');
+  return `  ${e.path}:\n    ${m}:\n      summary: ${e.summary}${e.auth?`\n      x-sap-auth: "${e.auth}"`:''}\n${params}${body}      responses:\n${ok}${errs?'\n'+errs:''}`}).join('\n')}
+function genRoutes(eps){return `" 路由骨架（由端點表生成）\n`+eps.map(e=>`" ${e.method} ${e.path} → ${e.summary}\n"   params: ${e.params.map(p=>`${p.name}(${p.in})`).join(', ')||'-'} | body: ${e.body||'-'} | ${e.ok} → ${e.resp||'-'} | auth: ${e.auth||'-'}`).join('\n')}
+function endpointsTab(p){const s=p.spec;const ro=s.frozen;const eps=s.endpoints;const structs=s.fields.map(x=>x.name);const cur=eps[S.esel]||eps[0];if(!cur)return '<div class="muted">尚無端點</div>';
+  const so=(sel,blank)=>`${blank?`<option value="" ${!sel?'selected':''}>（無）</option>`:''}${structs.map(n=>`<option ${n===sel?'selected':''}>${esc(n)}</option>`).join('')}`;
+  const ins=['path','query','header'];
+  const prow=cur.params.map((q,i)=>`<tr><td><input data-pi="${i}" data-k="name" value="${esc(q.name)}" style="font-family:var(--mono)" ${ro?'readonly':''}></td>
+    <td><select data-pi="${i}" data-k="in" ${ro?'disabled':''}>${ins.map(x=>`<option ${q.in===x?'selected':''}>${x}</option>`).join('')}</select></td>
+    <td><div class="row" style="gap:4px;flex-wrap:nowrap"><select data-pi="${i}" data-k="type" ${ro?'disabled':''}>${['string','integer','number','boolean'].map(t=>`<option ${q.type===t?'selected':''}>${t}</option>`).join('')}</select><input data-pi="${i}" data-k="len" value="${esc(q.len)}" placeholder="長度" style="width:56px" ${ro?'readonly':''}></div></td>
+    <td style="text-align:center"><input type="checkbox" data-pi="${i}" data-k="req" ${q.req?'checked':''} ${ro?'disabled':''} style="width:auto"></td>
+    <td><input data-pi="${i}" data-k="desc" value="${esc(q.desc)}" ${ro?'readonly':''}></td><td>${ro?'':`<button class="sm" data-pdel="${i}">✕</button>`}</td></tr>`).join('');
+  return `<div class="small muted" style="margin-bottom:8px">端點表定義介面的「形狀」：方法、路徑、輸入在哪裡（路徑 / query / body）、回什麼結構、錯誤碼、授權。PRD 不碰這些；agent 從 PRD 的資料需求推出來，開發在 G2 審。</div>
+    <div class="row" style="margin-bottom:8px"><span class="small muted">端點</span>${eps.map((e,i)=>`<button class="sm ${e===cur?'primary':''}" data-esel="${i}"><span style="font-family:var(--mono)">${esc(e.method)}</span> ${esc(e.path)}</button>`).join('')}${ro?'':'<button class="sm" id="btnAddEp">＋ 端點</button>'}</div>
+    <div class="tw"><table><tr><th style="width:90px">方法</th><th>路徑</th><th>摘要</th><th>授權（AUTHORITY-CHECK）</th></tr><tr>
+      <td><select data-ek="method" ${ro?'disabled':''}>${METHODS.map(m=>`<option ${cur.method===m?'selected':''}>${m}</option>`).join('')}</select></td>
+      <td><input data-ek="path" value="${esc(cur.path)}" style="font-family:var(--mono)" ${ro?'readonly':''}></td>
+      <td><input data-ek="summary" value="${esc(cur.summary)}" ${ro?'readonly':''}></td>
+      <td><input data-ek="auth" value="${esc(cur.auth)}" ${ro?'readonly':''}></td></tr></table></div>
+    <h3 style="margin-top:12px">輸入 · 參數（路徑 / query / header）</h3>
+    <div class="tw"><table><tr><th>名稱</th><th>位置</th><th>型別</th><th>必填</th><th>說明</th><th></th></tr>${prow||'<tr><td colspan="6" class="muted small">無參數</td></tr>'}</table></div>
+    ${ro?'':'<div class="row" style="margin-top:6px"><button class="sm" id="btnAddParam">＋ 參數</button></div>'}
+    <h3 style="margin-top:12px">輸入 · 請求 Body 與輸出</h3>
+    <div class="tw"><table><tr><th>請求 Body（結構）</th><th>成功狀態碼</th><th>成功回應（結構）</th><th>錯誤碼（逗號分隔）</th></tr><tr>
+      <td><select data-ek="body" ${ro?'disabled':''}>${so(cur.body,true)}</select></td>
+      <td><input data-ek="ok" value="${esc(cur.ok)}" style="width:70px" ${ro?'readonly':''}></td>
+      <td><select data-ek="resp" ${ro?'disabled':''}>${so(cur.resp,true)}</select></td>
+      <td><input data-ek="errors" value="${esc(cur.errors)}" ${ro?'readonly':''}></td></tr></table></div>
+    ${ro?'':`<div class="row" style="margin-top:8px"><button class="sm danger" id="btnDelEp">移除此端點</button></div>`}
+    <div class="tabs" style="margin-top:14px"><div class="tab ${(S.epv||'yaml')==='yaml'?'on':''}" data-epv="yaml">生成的 paths</div><div class="tab ${S.epv==='route'?'on':''}" data-epv="route">ABAP 路由骨架</div></div>
+    <pre style="max-height:260px">${esc(S.epv==='route'?genRoutes(eps):genPaths(eps))}</pre>`}
+function bindEndpoints(p){const eps=p.spec.endpoints;const cur=eps[S.esel]||eps[0];const rr=()=>{syncSpecFromFields(p);render()};
+  document.querySelectorAll('[data-esel]').forEach(b=>b.onclick=()=>{S.esel=+b.dataset.esel;render()});
+  document.querySelectorAll('[data-epv]').forEach(b=>b.onclick=()=>{S.epv=b.dataset.epv;render()});
+  document.querySelectorAll('[data-ek]').forEach(el=>el.onchange=()=>{cur[el.dataset.ek]=el.value;rr()});
+  document.querySelectorAll('[data-pi]').forEach(el=>el.onchange=()=>{const q=cur.params[+el.dataset.pi];const k=el.dataset.k;q[k]=k==='req'?el.checked:el.value;rr()});
+  document.querySelectorAll('[data-pdel]').forEach(b=>b.onclick=()=>{cur.params.splice(+b.dataset.pdel,1);rr()});
+  const q=(id,fn)=>{const e=document.getElementById(id);if(e)e.onclick=fn};
+  q('btnAddParam',()=>{cur.params.push({name:'param',in:'query',type:'string',len:'',req:false,desc:''});rr()});
+  q('btnAddEp',()=>{eps.push({method:'GET',path:'/po/{ebeln}/new',summary:'',params:[],body:'',ok:'200',resp:'',errors:'400,403,404',auth:''});S.esel=eps.length-1;rr()});
+  q('btnDelEp',()=>{if(eps.length<=1)return toast('至少保留一個端點');eps.splice(eps.indexOf(cur),1);S.esel=0;rr()})}
 function enumVals(f){return (f.rule||'').split('/').map(s=>s.trim()).filter(Boolean)}
 function exVal(f){const e=f.ex;switch(f.type){case 'integer':case 'number':return isNaN(+e)?0:+e;case 'boolean':return e==='true';default:return e}}
 function genExample(structs,name,depth=0){const s=structs.find(x=>x.name===name);if(!s||depth>4)return {};const o={};
@@ -326,33 +376,13 @@ function ytype(f){switch(f.type){case 'string':return `{ type: string${f.len?`, 
   case 'list of':return `{ type: array, items: { $ref: '#/components/schemas/${f.ref||'?'}' } }`;
   case 'object':return `{ $ref: '#/components/schemas/${f.ref||'?'}' }`;
   default:return `{ type: ${f.type}${f.ex?`, example: ${f.ex}`:''} }`}}
-function genYaml(structs){const comps=structs.map(s=>`    ${s.name}:\n      type: object\n      required: [${s.fields.filter(f=>f.req).map(f=>f.name).join(', ')}]\n      properties:\n${s.fields.map(f=>`        ${f.name}: ${ytype(f)}${f.label?`  # ${f.label}`:''}`).join('\n')}`).join('\n');
-  return `# 由欄位表生成 — 請改欄位表，勿手改此檔
+function genYaml(structs,eps){const comps=structs.map(s=>`    ${s.name}:\n      type: object\n      required: [${s.fields.filter(f=>f.req).map(f=>f.name).join(', ')}]\n      properties:\n${s.fields.map(f=>`        ${f.name}: ${ytype(f)}${f.label?`  # ${f.label}`:''}`).join('\n')}`).join('\n');
+  return `# 由端點表（paths）與欄位表（schemas）生成 — 請改表，勿手改此檔
 openapi: 3.0.3
 info: { title: Z PO Status API, version: 0.1.0 }
 servers: [ { url: /sap/bc/zapi } ]
 paths:
-  /po/{ebeln}:
-    get:
-      summary: 查詢採購單狀態
-      parameters:
-        - { name: ebeln, in: path, required: true, schema: { type: string, maxLength: 10 } }
-      responses:
-        '200': { description: 抬頭 + 項目 + 交貨狀態, content: { application/json: { schema: { $ref: '#/components/schemas/PoStatus' } } } }
-        '400': { $ref: '#/components/responses/Err' }
-        '403': { $ref: '#/components/responses/Err' }
-        '404': { $ref: '#/components/responses/Err' }
-  /po/{ebeln}/note:
-    post:
-      summary: 新增備註（寫入 ZPO_NOTE）
-      requestBody:
-        required: true
-        content: { application/json: { schema: { $ref: '#/components/schemas/NoteRequest' } } }
-      responses:
-        '201': { description: 已建立 }
-        '400': { $ref: '#/components/responses/Err' }
-        '403': { $ref: '#/components/responses/Err' }
-        '404': { $ref: '#/components/responses/Err' }
+${genPaths(eps||[])}
 components:
   responses:
     Err: { description: 錯誤, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
@@ -360,7 +390,7 @@ components:
 ${comps}`}
 function atype(f){switch(f.type){case 'string':case 'enum':return f.len?`c LENGTH ${f.len}`:'string';case 'integer':return 'i';case 'number':return 'p LENGTH 13 DECIMALS 3';case 'boolean':return 'abap_bool';case 'list of':return `STANDARD TABLE OF ty_${(f.ref||'x').toLowerCase()} WITH DEFAULT KEY`;case 'object':return `ty_${(f.ref||'x').toLowerCase()}`}}
 function genAbap(structs){const order=[...structs].reverse();return `" 由欄位表生成 — 勿手改\n`+order.map(s=>`TYPES: BEGIN OF ty_${s.name.toLowerCase()},\n${s.fields.map(f=>`         ${f.name.padEnd(8)} TYPE ${atype(f)},${f.label?`  " ${f.label}`:''}`).join('\n')}\n       END OF ty_${s.name.toLowerCase()}.`).join('\n\n')}
-function syncSpecFromFields(p){p.spec.openapi=genYaml(p.spec.fields)}
+function syncSpecFromFields(p){p.spec.openapi=genYaml(p.spec.fields,p.spec.endpoints)}
 function fieldsTab(p){const s=p.spec;const ro=s.frozen;const st=s.fields;const cur=st[S.fsel]||st[0];if(!cur)return '<div class="muted">尚無結構</div>';
   const refOpts=sel=>st.map(x=>`<option ${x.name===sel?'selected':''}>${esc(x.name)}</option>`).join('');
   const rows=cur.fields.map((f,i)=>`<tr>
@@ -406,21 +436,21 @@ const FAILS=['HTTP 500 — 未處理例外','HTTP 404 — 分支漏 RETURN','sta
 const REVISES=['修正：404 分支漏了 RETURN，導致繼續往下序列化空結構。','修正：狀態計算把 WEMNG=0 誤判為 PARTIAL，改為先檢查全部為 0。','修正：ZPO_NOTE 寫入前未檢查 text 空白，補上 INVALID_TEXT 分支。','修正：授權檢查放錯位置，移到路由之後、讀取之前。','修正：ABAP Unit 期望值與 openapi 不一致，依 openapi 調整。'];
 
 // ---------- state (in-page simulation of the backend)
-const S={projects:[],cur:null,tab:'fields',openIt:null,fsel:0,pv:'json'};
+const S={projects:[],cur:null,tab:'endpoints',openIt:null,fsel:0,pv:'json',esel:0,epv:'yaml'};
 let rnd=mulberry(7);function mulberry(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
 function parseScenarios(f){return (f||'').split('\n').map(l=>l.trim()).filter(l=>l.startsWith('Scenario')).map(l=>l.replace(/^Scenario( Outline)?:\s*/,''))}
 function cp(){return S.projects.find(p=>p.id===S.cur)}
 
-function newProject(){const p={id:uid(),name:'採購單狀態查詢 API',prd:SAMPLE_PRD,glossary:SAMPLE_GLOSS,stage:'prd',spec:{openapi:'',feature:'',tech_spec:'',fields:[],frozen:false,generating:false},gates:[],runs:[],approvals:[],notes:[],created:now()};S.projects.unshift(p);S.cur=p.id;S.openIt=null;render();toast('已建立專案（已載入範例 PRD）')}
+function newProject(){const p={id:uid(),name:'採購單狀態查詢 API',prd:SAMPLE_PRD,glossary:SAMPLE_GLOSS,stage:'prd',spec:{openapi:'',feature:'',tech_spec:'',fields:[],endpoints:[],frozen:false,generating:false},gates:[],runs:[],approvals:[],notes:[],created:now()};S.projects.unshift(p);S.cur=p.id;S.openIt=null;render();toast('已建立專案（已載入範例 PRD）')}
 
 // gates
 function gate(n,approve){const p=cp();const who=$(`#g${n}who`).value.trim(),note=$(`#g${n}note`).value.trim();
   if(!who)return toast('請填「誰」通過的——人出手的紀錄是體驗的一部分');
   if(n===1){p.prd=$('#prd').value;p.glossary=$('#glossary').value}
   p.gates.push({gate:n,status:approve?'APPROVED':'REJECTED',who,note,ts:now()});
-  if(approve){if(n===1&&p.stage==='prd'){p.stage='spec';if(p.spec.fields.length){S.tab='fields';toast('沿用既有規格；需要重生請按「重新產生」')}else generateSpec(p)}else if(n===2&&p.stage==='spec'){p.spec.frozen=true;p.stage='dev'}else if(n===4&&p.stage==='release'){p.stage='done'}}
+  if(approve){if(n===1&&p.stage==='prd'){p.stage='spec';if(p.spec.fields.length){S.tab='endpoints';toast('沿用既有規格；需要重生請按「重新產生」')}else generateSpec(p)}else if(n===2&&p.stage==='spec'){p.spec.frozen=true;p.stage='dev'}else if(n===4&&p.stage==='release'){p.stage='done'}}
   render()}
-function generateSpec(p){p.spec.generating=true;p.spec.feature='';p.spec.openapi='';p.spec.tech_spec='';p.spec.fields=[];render();setTimeout(()=>{p.spec.generating=false;p.spec.fields=DEFAULT_FIELDS();syncSpecFromFields(p);p.spec.feature=SPEC_FEATURE;p.spec.tech_spec=SPEC_TECH;S.tab='fields';S.fsel=0;render();toast('agent 已從 PRD 資料需求表產生欄位表、Gherkin、Tech Spec')},1600)}
+function generateSpec(p){p.spec.generating=true;p.spec.feature='';p.spec.openapi='';p.spec.tech_spec='';p.spec.fields=[];p.spec.endpoints=[];render();setTimeout(()=>{p.spec.generating=false;p.spec.fields=DEFAULT_FIELDS();p.spec.endpoints=DEFAULT_ENDPOINTS();syncSpecFromFields(p);p.spec.feature=SPEC_FEATURE;p.spec.tech_spec=SPEC_TECH;S.tab='endpoints';S.fsel=0;S.esel=0;render();toast('agent 已從 PRD 產生端點表、欄位表、Gherkin、Tech Spec')},1600)}
 function unfreeze(){S.rb=true;render();$('#rbNote')&&($('#rbNote').value='規格解凍，回到閘門 2');$('#rbWho')?.focus()}
 // ---------- rollback: any stage → previous stage, content preserved, reason logged
 const PREV={spec:'prd',dev:'spec',release:'dev',done:'release'};
@@ -432,9 +462,9 @@ function rollback(target,presetNote){const p=cp();const from=p.stage;const to=ta
   if(from==='dev'||from==='release'||from==='done'){if(to==='spec'||to==='prd')p.spec.frozen=false}
   const gateOf={prd:1,spec:2,dev:3,release:4};
   p.gates.push({gate:gateOf[to]||0,status:'ROLLBACK',who,note:`${stageName(from)} → ${stageName(to)}：${note}`,ts:now()});
-  p.stage=to;if(to==='spec')S.tab='fields';S.rb=false;render();toast(`已退回到「${stageName(to)}」`)}
+  p.stage=to;if(to==='spec')S.tab='endpoints';S.rb=false;render();toast(`已退回到「${stageName(to)}」`)}
 function rollbackCard(p){const to=PREV[p.stage];if(!to)return '';const r=currentRun(p);
-  const hint={spec:'回到 PRD 修改；規格內容保留，改完 PRD 後可按「重新產生」或直接沿用再過 G1。',dev:'規格解凍，可改欄位表 / Gherkin；迴圈紀錄保留，改完再過 G2 重啟迴圈。',release:'回到迴圈階段；可重啟迴圈或調整後再放行。',done:'回到放行階段重新審核。'}[p.stage];
+  const hint={spec:'回到 PRD 修改；規格內容保留，改完 PRD 後可按「重新產生」或直接沿用再過 G1。',dev:'規格解凍，可改端點表 / 欄位表 / Gherkin；迴圈紀錄保留，改完再過 G2 重啟迴圈。',release:'回到迴圈階段；可重啟迴圈或調整後再放行。',done:'回到放行階段重新審核。'}[p.stage];
   return `<div class="card" style="border-style:dashed"><div class="row"><h3 class="grow" style="margin:0">↩ 退回上一步（${stageName(p.stage)} → ${stageName(to)}）</h3>${S.rb?'':`<button class="sm" id="btnRbOpen" ${running(r)?'disabled title="迴圈執行中"':''}>退回</button>`}</div>
     ${S.rb?`<div class="small muted" style="margin:6px 0 8px">${hint}</div><div class="row"><input id="rbWho" placeholder="誰" style="width:120px"><input id="rbNote" class="grow" placeholder="退回原因（必填，會留在閘門紀錄）"><button class="danger" id="btnRbGo">確認退回</button><button class="sm" id="btnRbCancel">取消</button></div>`:''}</div>`}
 
@@ -498,10 +528,10 @@ function renderStage(p){switch(p.stage){
     <div class="row" style="margin-bottom:6px"><b class="grow">PRD</b><button class="sm" id="btnSamplePrd">載入範本</button></div><textarea id="prd">${esc(p.prd)}</textarea>
     <div class="row" style="margin:10px 0 6px"><b class="grow">業務詞彙表</b><button class="sm" id="btnSampleGloss">載入範本</button></div><textarea id="glossary" class="short">${esc(p.glossary)}</textarea></div>
     ${gateCard(1,'PRD 定稿：PM + 開發 + Key User 開 Three Amigos，把驗收條件改成 Given/When/Then 後通過。通過後 agent 自動產生系統規格。')}`;
-  case 'spec':{const s=p.spec;const tabs={fields:'欄位表',feature:'Gherkin 情境',openapi:'OpenAPI（生成）',tech_spec:'Tech Spec'};const sc=parseScenarios(s.feature);const derived=S.tab==='openapi';return `<div class="card"><h3>階段 1 · 系統規格（agent 產生，人審）</h3>
+  case 'spec':{const s=p.spec;const tabs={endpoints:'端點表',fields:'欄位表',feature:'Gherkin 情境',openapi:'OpenAPI（生成）',tech_spec:'Tech Spec'};const sc=parseScenarios(s.feature);const derived=S.tab==='openapi';return `<div class="card"><h3>階段 1 · 系統規格（agent 產生，人審）</h3>
     ${s.generating?'<div class="banner warn">agent 產生中…（正式版走 gateway 約 30–90 秒）</div>':''}
     <div class="tabs">${Object.keys(tabs).map(t=>`<div class="tab ${S.tab===t?'on':''}" data-tab="${t}">${tabs[t]}</div>`).join('')}</div>
-    ${S.tab==='fields'?(s.fields.length?fieldsTab(p):'<div class="muted">等 agent 產生…</div>'):`<textarea id="specText" style="min-height:340px" ${s.frozen||derived?'readonly':''}>${esc(s[S.tab])}</textarea>
+    ${S.tab==='endpoints'?(s.endpoints.length?endpointsTab(p):'<div class="muted">等 agent 產生…</div>'):S.tab==='fields'?(s.fields.length?fieldsTab(p):'<div class="muted">等 agent 產生…</div>'):`<textarea id="specText" style="min-height:340px" ${s.frozen||derived?'readonly':''}>${esc(s[S.tab])}</textarea>
     <div class="row" style="margin-top:10px">${derived?'<span class="small muted">此檔由欄位表生成，要改請改欄位表。</span>':`<button id="btnSaveSpec" ${s.frozen?'disabled':''}>儲存此頁</button>`}<button id="btnRegen" ${s.frozen?'disabled':''}>重新產生</button><span class="grow"></span><span class="small muted">情境數：${sc.length}</span></div>
     ${S.tab==='feature'?`<div style="margin-top:10px" class="cols">${sc.map(x=>`<div class="scen"><span class="dot"></span>${esc(x)}</div>`).join('')}</div>`:''}`}</div>
     ${gateCard(2,'規格核准：開發審 Tech Spec，PM 審 Gherkin。通過後 feature 凍結，成為迴圈的 done 條件；要改必須回到這個閘門。')}`}
@@ -557,6 +587,7 @@ function bindMain(p){document.querySelectorAll('[data-gate]').forEach(b=>b.oncli
   q('btnSaveSpec',()=>{p.spec[S.tab]=$('#specText').value;render();toast('已儲存')});q('btnRegen',()=>generateSpec(p));
   q('btnStart',startLoop);q('btnStop',stopLoop);q('btnUnfreeze',unfreeze);
   if(p.stage==='spec'&&S.tab==='fields'&&p.spec.fields.length)bindFields(p);
+  if(p.stage==='spec'&&S.tab==='endpoints'&&p.spec.endpoints.length)bindEndpoints(p);
   q('btnRbOpen',()=>{S.rb=true;render();$('#rbWho')?.focus()});q('btnRbCancel',()=>{S.rb=false;render()});q('btnRbGo',()=>rollback());
   const prd=$('#prd'),gl=$('#glossary');if(prd)prd.oninput=()=>p.prd=prd.value;if(gl)gl.oninput=()=>p.glossary=gl.value}
 function renderApprovals(){const p=cp();const a=p?p.approvals.filter(x=>x.status==='PENDING'):[];const c=$('#pendingCount');c.hidden=!a.length;c.textContent=a.length;

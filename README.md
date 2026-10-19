@@ -17,7 +17,7 @@ uvicorn app:app --host 0.0.0.0 --port 8080
 | 閘門 | 誰 | 效果 |
 |---|---|---|
 | G1 PRD 定稿 | PM + 開發 + Key User | 通過後 agent 自動產生 OpenAPI / Gherkin / Tech Spec |
-| G2 規格核准 | 開發審 tech spec、PM 審 feature | 通過後 feature **凍結**＝迴圈的 done 條件 |
+| G2 規格核准 | 開發審端點表 / 欄位表 / tech spec、PM 審 feature | 通過後規格 **凍結**＝迴圈的 done 條件 |
 | G3 寫入 D01 審批 | 開發 | 每次寫入先 PENDING，核准才寫；拒絕時意見會餵回 agent |
 | G4 TR 放行 | Team Lead | 全綠 + ATC + 情境結果 |
 
@@ -26,6 +26,13 @@ uvicorn app:app --host 0.0.0.0 --port 8080
 退回需填「誰」與原因，記錄在閘門紀錄為 `ROLLBACK`；內容一律保留（PRD、欄位表、Gherkin、迴圈紀錄），
 退回到 spec/prd 會自動解凍規格。迴圈執行中不能退回，要先停止。
 API：`POST /api/projects/{id}/rollback {who, note, to?}`。
+
+## 規格的分工（schema-first）
+- **PRD（PM）**：只寫業務資料需求——要輸入什麼、回什麼、業務意義、範例、規則。不寫 GET/POST、路徑、欄位英文名。
+- **端點表（agent 產生，開發審）**：方法、路徑、參數位置（path/query/header）、請求 body 結構、回應結構、錯誤碼、授權物件。
+- **欄位表（agent 產生，開發審）**：結構與欄位——英文名、型別、長度、必填、enum、巢狀。
+- **OpenAPI**：由端點表（paths）＋欄位表（schemas）生成，唯讀；ABAP TYPES 與路由骨架同樣生成。
+改欄位或端點＝改表、重生成；G2 之後要改須退回 G2。
 
 ## 迴圈（LOOP.md）
 每輪：Plan → Act → 寫入（經 G3）→ Verify（語法 / ABAP Unit / ATC / 情境）→ Revise。
