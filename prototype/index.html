@@ -1,0 +1,555 @@
+<title>SAP Loop Workbench</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+TC:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: three-column control room (projects | pipeline+stage | approvals+notes); stacks to one column on phones. */
+:root{
+  --bg:#eef0f3;--panel:#ffffff;--ink:#1c2128;--muted:#667085;--line:#d9dee6;--sub:#f5f7fa;
+  --accent:#1f5fbf;--accent-ink:#ffffff;--ok:#1b7f3b;--warn:#b06f12;--bad:#b83a1a;--blocked:#7c3aed;
+  --sans:"IBM Plex Sans TC","Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1319;--panel:#171c24;--ink:#e4e8ee;--muted:#8f9aab;--line:#2a323f;--sub:#1f2630;--accent:#7fa8ff;--accent-ink:#0f1319;--ok:#4cc26e;--warn:#e0a53c;--bad:#f0734f;--blocked:#b48cff;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1319;--panel:#171c24;--ink:#e4e8ee;--muted:#8f9aab;--line:#2a323f;--sub:#1f2630;--accent:#7fa8ff;--accent-ink:#0f1319;--ok:#4cc26e;--warn:#e0a53c;--bad:#f0734f;--blocked:#b48cff;color-scheme:dark}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;font:14px/1.55 var(--sans);background:var(--bg);color:var(--ink)}
+.app{display:grid;grid-template-columns:210px minmax(0,1fr) 330px;min-height:100%}
+aside,.rail{background:var(--panel);padding-block:16px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:16px}
+aside{border-right:1px solid var(--line)}
+.rail{border-left:1px solid var(--line);padding-left:16px;padding-right:max(16px,env(safe-area-inset-right,0px))}
+main{padding-block:18px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));min-width:0}
+@media (max-width:900px){.app{grid-template-columns:1fr}aside,.rail{border:0;border-bottom:1px solid var(--line);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}}
+h1{font-size:15px;margin:0 0 6px;font-weight:600}
+h2{font-size:11.5px;margin:18px 0 8px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.08em}
+h3{font-size:14px;margin:0 0 8px;font-weight:600;text-wrap:balance}
+button{font:inherit;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:6px 12px;border-radius:6px;cursor:pointer}
+button:hover{border-color:var(--muted)}
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button.danger{border-color:var(--bad);color:var(--bad)}
+button.sm{padding:3px 9px;font-size:12.5px}
+button:disabled{opacity:.45;cursor:not-allowed}
+input,textarea,select{font:inherit;color:var(--ink);background:var(--sub);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+textarea{font-family:var(--mono);font-size:12.5px;min-height:200px;resize:vertical;line-height:1.5}
+textarea.short{min-height:84px}
+label.f{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--muted)}
+label.f input,label.f select{width:auto}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px;min-width:0}
+.card.gate{border-color:var(--warn)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+.muted{color:var(--muted)}.small{font-size:12px}
+.proj{padding:7px 10px;border-radius:6px;cursor:pointer;margin-bottom:3px;display:flex;justify-content:space-between;gap:6px}
+.proj:hover{background:var(--sub)}.proj.active{background:var(--sub);font-weight:600}
+.badge{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.badge.ok{color:var(--ok);border-color:var(--ok)}.badge.warn{color:var(--warn);border-color:var(--warn)}
+.badge.bad{color:var(--bad);border-color:var(--bad)}.badge.blocked{color:var(--blocked);border-color:var(--blocked)}.badge.accent{color:var(--accent);border-color:var(--accent)}
+.pipe{display:flex;align-items:center;margin:10px 0 18px;overflow-x:auto;padding-bottom:4px}
+.stage{padding:7px 13px;border:1px solid var(--line);border-radius:8px;background:var(--panel);white-space:nowrap;color:var(--muted)}
+.stage.cur{border-color:var(--accent);color:var(--accent);font-weight:600}.stage.past{color:var(--ok);border-color:var(--ok)}
+.g{width:32px;height:32px;border-radius:50%;border:2px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:11px;margin:0 6px;color:var(--muted);flex:none;font-family:var(--mono)}
+.g.ok{border-color:var(--ok);color:var(--ok)}.g.wait{border-color:var(--warn);color:var(--warn);animation:pulse 1.3s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 6px color-mix(in srgb,var(--warn) 18%,transparent)}}
+@media (prefers-reduced-motion:reduce){.g.wait{animation:none}}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin-bottom:10px;overflow-x:auto}
+.tab{padding:6px 12px;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);white-space:nowrap}
+.tab.on{border-bottom-color:var(--accent);color:var(--ink);font-weight:600}
+.tw{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px}
+tr.it{cursor:pointer}tr.it:hover td{background:var(--sub)}
+tr.detail td{background:var(--sub);font-family:var(--mono);font-size:12px;white-space:pre-wrap}
+.kpi{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:10px 0 12px}
+@media (max-width:600px){.kpi{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kpi div{background:var(--sub);border-radius:8px;padding:10px 12px}
+.kpi b{display:block;font-size:22px;font-weight:600;font-variant-numeric:tabular-nums}
+.kpi b small{font-size:13px;color:var(--muted);font-weight:400}
+.kpi span{font-size:12px;color:var(--muted)}
+.banner{border-left:4px solid var(--blocked);background:color-mix(in srgb,var(--blocked) 9%,var(--panel));padding:10px 14px;border-radius:6px;margin-bottom:12px}
+.banner.ok{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 9%,var(--panel))}
+.banner.warn{border-color:var(--warn);background:color-mix(in srgb,var(--warn) 9%,var(--panel))}
+.appr{border:1px solid var(--warn);border-radius:8px;padding:10px;margin-bottom:10px}
+pre{background:var(--sub);padding:8px;border-radius:6px;font-family:var(--mono);font-size:11.5px;max-height:150px;overflow:auto;white-space:pre-wrap;margin:6px 0}
+svg text{font-family:var(--sans);font-size:11px;fill:var(--muted)}
+.scen{display:flex;gap:7px;align-items:center;padding:3px 0;font-size:13px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--line);flex:none}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}.dot.poison{background:var(--blocked)}
+.cols{columns:2;column-gap:20px}@media (max-width:600px){.cols{columns:1}}
+.note{padding:6px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.note b{color:var(--accent);margin-right:6px}
+.phase{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.toast{position:fixed;bottom:calc(16px + env(safe-area-inset-bottom,0px));left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:8px;font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:20}
+.toast.show{opacity:1}
+.confirm{display:inline-flex;gap:6px;align-items:center}
+.tip{font-size:12px;color:var(--muted);line-height:1.6}
+.proto{font-size:11px;color:var(--muted);border:1px dashed var(--line);border-radius:6px;padding:6px 8px;margin-top:8px}
+</style>
+
+<div class="app">
+<aside>
+  <h1>SAP Loop Workbench</h1>
+  <div class="small muted">LLM: mock · Executor: mock</div>
+  <h2>專案</h2>
+  <div id="projects"></div>
+  <button class="primary" style="width:100%;margin-top:8px" id="btnNew">＋ 新專案</button>
+  <h2>體驗提示</h2>
+  <div class="tip">人只在 4 個閘門出手，其餘讓迴圈跑。<br><br>想看「迴圈會停」：啟動時選一條毒情境。<br>想看「人在控制」：審批模式選「每輪」，然後拒絕一次。</div>
+  <div class="proto">Prototype：後端以頁內模擬取代，資料不會儲存。正式版為 FastAPI + SQLite，接內部 LLM gateway 與 ABAP BFF。</div>
+</aside>
+
+<main id="main"></main>
+
+<section class="rail">
+  <h2>待審批 <span id="pendingCount" class="badge warn" hidden></span></h2>
+  <div id="approvals"></div>
+  <h2>觀察筆記</h2>
+  <div id="notes"></div>
+  <div class="row" style="margin-top:8px">
+    <select id="noteRole" style="width:auto"><option value="觀察員">觀察員</option><option value="PM">PM</option><option value="開發">開發</option><option value="測試">測試</option></select>
+    <input id="noteText" class="grow" placeholder="如果是我會怎麼做…">
+  </div>
+</section>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ---------- helpers
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const now=()=>new Date().toISOString().slice(0,19).replace('T',' ');
+const uid=()=>Math.random().toString(36).slice(2,8);
+let toastT;function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),2200)}
+const STAGES=[['prd','PRD'],['spec','系統規格'],['dev','開發 / 測試迴圈'],['release','放行'],['done','完成']];
+const GATES={1:'PRD 定稿（Three Amigos）',2:'規格核准',3:'寫入 D01 審批',4:'TR 放行'};
+const stageName=s=>(STAGES.find(x=>x[0]===s)||[,s])[1];
+
+// ---------- samples
+const SAMPLE_PRD=`# PRD：採購單狀態查詢 API（Pilot）
+
+## 1. 背景
+外部物流系統需要用採購單號查詢交貨狀態，目前靠人工在 ME23N 查後回報。
+
+## 2. 目標
+GET /zapi/po/{ebeln} 回傳抬頭、項目、交貨狀態；POST /zapi/po/{ebeln}/note 寫入備註。
+
+## 3. 使用者
+物流系統（技術使用者）、採購 PM。
+
+## 4. 範圍
+- 做：讀 EKKO/EKPO，計算 OPEN / PARTIAL / DELIVERED / CLOSED；備註寫入 Z-table
+- 不做：OData、Fiori、修改標準程式、效能調校
+
+## 5. 業務規則
+- 所有項目 ELIKZ → DELIVERED；部分收貨 → PARTIAL；未收貨 → OPEN；刪除旗標 → CLOSED
+- 查詢需 M_BEST_EKO 顯示權限；寫備註需變更權限
+- 備註 1–255 字，空白拒絕
+
+## 6. 資料需求（業務語言；英文名與型別由 agent 補到欄位表）
+### 輸入
+| 資料 | 業務意義 | 必填 | 範例 | 規則 |
+|---|---|---|---|---|
+| 採購單號 | 要查的 PO | 是 | 4500000001 | 10 碼數字 |
+| 備註內容 | 外部系統要記的文字 | 是（寫備註時） | 請加速交貨 | 1–255 字 |
+
+### 輸出（查詢）
+| 資料 | 業務意義 | 範例 | 來源 / 規則 |
+|---|---|---|---|
+| 採購單號 | 同輸入 | 4500000001 | |
+| 供應商 | 下單對象 | V-TEST-01 | 供應商代碼，不回名稱 |
+| 交貨狀態 | 整張單的收貨進度 | 部分收 | 未收 / 部分收 / 已收完 / 已關閉，規則見 §5 |
+| 項目清單 | 每行物料的收貨情形 | 2 筆 | 每筆：項目號、物料、訂購量、已收量、是否收貨完成 |
+
+### 不回傳
+價格、條件、審批紀錄（物流系統不該看到）
+
+## 7. 驗收條件（用範例寫，不用形容詞）
+- 項目 10 已收、項目 20 未收的單 → 交貨狀態=部分收、項目 2 筆
+- 不存在的單 → 404、錯誤碼 PO_NOT_FOUND
+- 單號非 10 碼數字 → 400
+- 無權限使用者 → 403
+- 寫備註「請加速交貨」→ 201，ZPO_NOTE 多一筆
+- 寫空白備註 → 400，ZPO_NOTE 不增加
+
+## 8. 風險與依賴
+- 測試資料：固定測試採購單 4500000001 / 4500000002
+- 授權：測試使用者需有權 / 無權兩組角色`;
+const SAMPLE_GLOSS=`| 詞彙 | 定義 | SAP 對應 |
+|---|---|---|
+| 採購單 / PO | 向供應商下的採購憑證 | EKKO / EKPO |
+| 項目 | 採購單內的一行物料 | EKPO-EBELP |
+| 交貨狀態 | OPEN / PARTIAL / DELIVERED / CLOSED | ELIKZ、WEMNG、LOEKZ 推算 |
+| 已收貨量 | 已過帳收貨的數量 | EKET-WEMNG |
+| 備註 | 外部系統對採購單的文字註記 | ZPO_NOTE |`;
+const SPEC_FEATURE=`Feature: 採購單狀態查詢 API
+  讓外部系統用單號查詢採購單抬頭、項目與交貨狀態，並可寫入備註。
+
+  Background:
+    Given 測試採購單 "4500000001" 存在，供應商 "V-TEST-01"，公司代碼 "1000"
+    And 該採購單有 2 個項目，項目 10 已全數收貨，項目 20 尚未收貨
+
+  Scenario: 查詢存在的採購單
+    When 呼叫 GET /po/4500000001
+    Then 回應狀態碼為 200
+    And 回應欄位 status 為 "PARTIAL"
+    And 回應包含 2 個 items
+    And items[0].elikz 為 true
+
+  Scenario: 查詢不存在的採購單
+    When 呼叫 GET /po/4599999999
+    Then 回應狀態碼為 404
+    And 回應欄位 error 為 "PO_NOT_FOUND"
+
+  Scenario: 單號格式錯誤
+    When 呼叫 GET /po/ABC
+    Then 回應狀態碼為 400
+
+  Scenario: 無權限的使用者查詢
+    Given 呼叫者沒有授權物件 M_BEST_EKO
+    When 呼叫 GET /po/4500000001
+    Then 回應狀態碼為 403
+
+  Scenario: 新增備註成功
+    When 呼叫 POST /po/4500000001/note，內容 {"text": "請加速交貨"}
+    Then 回應狀態碼為 201
+    And 資料表 ZPO_NOTE 有一筆 EBELN = "4500000001" 且 NOTE_TEXT = "請加速交貨"
+
+  Scenario: 備註文字空白
+    When 呼叫 POST /po/4500000001/note，內容 {"text": ""}
+    Then 回應狀態碼為 400
+    And 資料表 ZPO_NOTE 沒有新增任何資料
+
+  Scenario: 對不存在的採購單新增備註
+    When 呼叫 POST /po/4599999999/note，內容 {"text": "x"}
+    Then 回應狀態碼為 404
+
+  Scenario: 全數收貨的採購單狀態
+    Given 測試採購單 "4500000002" 存在且所有項目已全數收貨
+    When 呼叫 GET /po/4500000002
+    Then 回應欄位 status 為 "DELIVERED"`;
+const SPEC_OPENAPI=`openapi: 3.0.3
+info: { title: Z PO Status API, version: 0.1.0 }
+servers: [ { url: /sap/bc/zapi } ]
+paths:
+  /po/{ebeln}:
+    get:
+      summary: 查詢採購單狀態
+      parameters:
+        - { name: ebeln, in: path, required: true, schema: { type: string, maxLength: 10 } }
+      responses:
+        '200': { description: 抬頭 + 項目 + 交貨狀態, content: { application/json: { schema: { $ref: '#/components/schemas/PoStatus' } } } }
+        '400': { description: 單號格式錯誤 }
+        '403': { description: 無 M_BEST_EKO 權限 }
+        '404': { description: 採購單不存在 }
+  /po/{ebeln}/note:
+    post:
+      summary: 新增備註（寫入 ZPO_NOTE）
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [text], properties: { text: { type: string, maxLength: 255 } } } } }
+      responses:
+        '201': { description: 已建立 }
+        '400': { description: text 空白或超長 }
+        '403': { description: 無權限 }
+        '404': { description: 採購單不存在 }
+components:
+  schemas:
+    PoStatus:
+      type: object
+      properties:
+        ebeln: { type: string }
+        lifnr: { type: string }
+        bukrs: { type: string }
+        status: { type: string, enum: [OPEN, PARTIAL, DELIVERED, CLOSED] }
+        items:
+          type: array
+          items: { type: object, properties: { ebelp: { type: string }, matnr: { type: string }, menge: { type: number }, wemng: { type: number }, elikz: { type: boolean } } }`;
+const SPEC_TECH=`# Tech Spec — Z PO Status API
+
+## SICF
+- 節點：/sap/bc/zapi/po
+- Handler：ZCL_ZAPI_PO_HTTP（IF_HTTP_EXTENSION），只做路由與序列化
+- 路由：PATH_INFO /{ebeln} → GET；/{ebeln}/note → POST
+
+## 物件
+| 物件 | 類型 | 說明 |
+|---|---|---|
+| ZCL_ZAPI_PO_HTTP | Class | HTTP handler |
+| ZCL_PO_STATUS_SRV | Class | 業務邏輯：讀 EKKO/EKPO，計算 status |
+| ZPO_NOTE | Table | EBELN, SEQNO, NOTE_TEXT, ERNAM, ERDAT, ERZET |
+| ZCL_ZAPI_PO_HTTP_TEST | Test class | ABAP Unit，OSQL test double |
+
+## 狀態規則
+- 所有項目 ELIKZ = X → DELIVERED
+- 任一項目 WEMNG > 0 但非全部 ELIKZ → PARTIAL
+- 全部 WEMNG = 0 → OPEN
+- EKKO-LOEKZ = L → CLOSED
+
+## 授權
+- 讀：AUTHORITY-CHECK OBJECT 'M_BEST_EKO' ACTVT '03'
+- 寫：ACTVT '02'
+
+## 錯誤處理
+- body: {"error": "<CODE>", "message": "<text>"}
+- PO_NOT_FOUND / INVALID_EBELN / NO_AUTH / INVALID_TEXT
+
+## 測試資料
+- 固定前綴 45000000xx，由 Given 以 BAPI_PO_CREATE1 建立或直接 INSERT
+- 每輪 run id 寫入 ZPO_NOTE.ERNAM 供清理`;
+// ---------- field table (schema-first): structures → openapi / example / ABAP TYPES
+const TYPES=['string','integer','number','boolean','enum','list of','object'];
+const DEFAULT_FIELDS=()=>[
+ {name:'PoStatus',role:'回應 · GET /po/{ebeln}',fields:[
+  {label:'採購單號',name:'ebeln',type:'string',len:'10',req:true,ex:'4500000001',rule:'10 碼數字'},
+  {label:'供應商',name:'lifnr',type:'string',len:'10',req:true,ex:'V-TEST-01',rule:'供應商代碼，不回名稱'},
+  {label:'公司代碼',name:'bukrs',type:'string',len:'4',req:true,ex:'1000',rule:''},
+  {label:'交貨狀態',name:'status',type:'enum',len:'',req:true,ex:'PARTIAL',rule:'OPEN/PARTIAL/DELIVERED/CLOSED'},
+  {label:'項目清單',name:'items',type:'list of',ref:'Item',len:'',req:true,ex:'',rule:'每行物料的收貨情形'}]},
+ {name:'Item',role:'子結構',fields:[
+  {label:'項目號',name:'ebelp',type:'string',len:'5',req:true,ex:'00010',rule:''},
+  {label:'物料',name:'matnr',type:'string',len:'40',req:true,ex:'M-BOND-100',rule:''},
+  {label:'訂購量',name:'menge',type:'number',len:'',req:true,ex:'100',rule:''},
+  {label:'已收量',name:'wemng',type:'number',len:'',req:true,ex:'100',rule:'EKET-WEMNG 加總'},
+  {label:'收貨完成',name:'elikz',type:'boolean',len:'',req:true,ex:'true',rule:'EKPO-ELIKZ'}]},
+ {name:'NoteRequest',role:'請求 · POST /po/{ebeln}/note',fields:[
+  {label:'備註內容',name:'text',type:'string',len:'255',req:true,ex:'請加速交貨',rule:'1–255 字，空白拒絕'}]},
+ {name:'Error',role:'錯誤回應 · 4xx',fields:[
+  {label:'錯誤碼',name:'error',type:'enum',len:'',req:true,ex:'PO_NOT_FOUND',rule:'PO_NOT_FOUND/INVALID_EBELN/NO_AUTH/INVALID_TEXT'},
+  {label:'訊息',name:'message',type:'string',len:'',req:false,ex:'採購單不存在',rule:''}]}];
+function enumVals(f){return (f.rule||'').split('/').map(s=>s.trim()).filter(Boolean)}
+function exVal(f){const e=f.ex;switch(f.type){case 'integer':case 'number':return isNaN(+e)?0:+e;case 'boolean':return e==='true';default:return e}}
+function genExample(structs,name,depth=0){const s=structs.find(x=>x.name===name);if(!s||depth>4)return {};const o={};
+  s.fields.forEach(f=>{if(f.type==='list of')o[f.name]=[genExample(structs,f.ref,depth+1)];else if(f.type==='object')o[f.name]=genExample(structs,f.ref,depth+1);else o[f.name]=exVal(f)});return o}
+function ytype(f){switch(f.type){case 'string':return `{ type: string${f.len?`, maxLength: ${f.len}`:''}${f.ex?`, example: "${f.ex}"`:''} }`;
+  case 'enum':return `{ type: string, enum: [${enumVals(f).join(', ')}] }`;
+  case 'list of':return `{ type: array, items: { $ref: '#/components/schemas/${f.ref||'?'}' } }`;
+  case 'object':return `{ $ref: '#/components/schemas/${f.ref||'?'}' }`;
+  default:return `{ type: ${f.type}${f.ex?`, example: ${f.ex}`:''} }`}}
+function genYaml(structs){const comps=structs.map(s=>`    ${s.name}:\n      type: object\n      required: [${s.fields.filter(f=>f.req).map(f=>f.name).join(', ')}]\n      properties:\n${s.fields.map(f=>`        ${f.name}: ${ytype(f)}${f.label?`  # ${f.label}`:''}`).join('\n')}`).join('\n');
+  return `# 由欄位表生成 — 請改欄位表，勿手改此檔
+openapi: 3.0.3
+info: { title: Z PO Status API, version: 0.1.0 }
+servers: [ { url: /sap/bc/zapi } ]
+paths:
+  /po/{ebeln}:
+    get:
+      summary: 查詢採購單狀態
+      parameters:
+        - { name: ebeln, in: path, required: true, schema: { type: string, maxLength: 10 } }
+      responses:
+        '200': { description: 抬頭 + 項目 + 交貨狀態, content: { application/json: { schema: { $ref: '#/components/schemas/PoStatus' } } } }
+        '400': { $ref: '#/components/responses/Err' }
+        '403': { $ref: '#/components/responses/Err' }
+        '404': { $ref: '#/components/responses/Err' }
+  /po/{ebeln}/note:
+    post:
+      summary: 新增備註（寫入 ZPO_NOTE）
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/NoteRequest' } } }
+      responses:
+        '201': { description: 已建立 }
+        '400': { $ref: '#/components/responses/Err' }
+        '403': { $ref: '#/components/responses/Err' }
+        '404': { $ref: '#/components/responses/Err' }
+components:
+  responses:
+    Err: { description: 錯誤, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+${comps}`}
+function atype(f){switch(f.type){case 'string':case 'enum':return f.len?`c LENGTH ${f.len}`:'string';case 'integer':return 'i';case 'number':return 'p LENGTH 13 DECIMALS 3';case 'boolean':return 'abap_bool';case 'list of':return `STANDARD TABLE OF ty_${(f.ref||'x').toLowerCase()} WITH DEFAULT KEY`;case 'object':return `ty_${(f.ref||'x').toLowerCase()}`}}
+function genAbap(structs){const order=[...structs].reverse();return `" 由欄位表生成 — 勿手改\n`+order.map(s=>`TYPES: BEGIN OF ty_${s.name.toLowerCase()},\n${s.fields.map(f=>`         ${f.name.padEnd(8)} TYPE ${atype(f)},${f.label?`  " ${f.label}`:''}`).join('\n')}\n       END OF ty_${s.name.toLowerCase()}.`).join('\n\n')}
+function syncSpecFromFields(p){p.spec.openapi=genYaml(p.spec.fields)}
+function fieldsTab(p){const s=p.spec;const ro=s.frozen;const st=s.fields;const cur=st[S.fsel]||st[0];if(!cur)return '<div class="muted">尚無結構</div>';
+  const refOpts=sel=>st.map(x=>`<option ${x.name===sel?'selected':''}>${esc(x.name)}</option>`).join('');
+  const rows=cur.fields.map((f,i)=>`<tr>
+    <td><input data-fi="${i}" data-k="label" value="${esc(f.label)}" ${ro?'readonly':''}></td>
+    <td><input data-fi="${i}" data-k="name" value="${esc(f.name)}" style="font-family:var(--mono)" ${ro?'readonly':''}></td>
+    <td><div class="row" style="gap:4px;flex-wrap:nowrap"><select data-fi="${i}" data-k="type" ${ro?'disabled':''}>${TYPES.map(t=>`<option ${f.type===t?'selected':''}>${t}</option>`).join('')}</select>${['list of','object'].includes(f.type)?`<select data-fi="${i}" data-k="ref" ${ro?'disabled':''}>${refOpts(f.ref)}</select>`:f.type==='string'?`<input data-fi="${i}" data-k="len" value="${esc(f.len)}" placeholder="長度" style="width:56px" ${ro?'readonly':''}>`:''}</div></td>
+    <td style="text-align:center"><input type="checkbox" data-fi="${i}" data-k="req" ${f.req?'checked':''} ${ro?'disabled':''} style="width:auto"></td>
+    <td><input data-fi="${i}" data-k="ex" value="${esc(f.ex)}" ${ro?'readonly':''}></td>
+    <td><input data-fi="${i}" data-k="rule" value="${esc(f.rule)}" placeholder="${f.type==='enum'?'A/B/C':''}" ${ro?'readonly':''}></td>
+    <td>${ro?'':`<button class="sm" data-del="${i}" title="移除">✕</button>`}</td></tr>`).join('');
+  const ex=JSON.stringify(genExample(st,cur.name),null,2);
+  const pv={json:'範例 JSON',yaml:'生成的 OpenAPI',abap:'ABAP TYPES'};const pvc={json:ex,yaml:genYaml(st),abap:genAbap(st)}[S.pv||'json'];
+  return `<div class="small muted" style="margin-bottom:8px">欄位表是契約的唯一來源：OpenAPI、範例 JSON、ABAP TYPES 都由它生成。型別只有 7 種，巢狀用「list of / object」指向另一個結構。</div>
+    <div class="row" style="margin-bottom:8px"><span class="small muted">結構</span>${st.map((x,i)=>`<button class="sm ${x===cur?'primary':''}" data-fsel="${i}">${esc(x.name)}</button>`).join('')}${ro?'':'<button class="sm" id="btnAddStruct">＋ 結構</button>'}<span class="grow"></span><span class="badge">${esc(cur.role)}</span></div>
+    <div class="tw"><table><tr><th>資料（業務名）</th><th>英文名</th><th>型別</th><th>必填</th><th>範例</th><th>規則 / enum 值</th><th></th></tr>${rows}</table></div>
+    ${ro?'':`<div class="row" style="margin-top:8px"><button class="sm" id="btnAddField">＋ 欄位</button><button class="sm danger" id="btnDelStruct">移除此結構</button></div>`}
+    <div class="tabs" style="margin-top:14px">${Object.keys(pv).map(k=>`<div class="tab ${(S.pv||'json')===k?'on':''}" data-pv="${k}">${pv[k]}</div>`).join('')}</div>
+    <pre style="max-height:260px">${esc(pvc)}</pre>`}
+function bindFields(p){const st=p.spec.fields;const cur=st[S.fsel]||st[0];const rr=()=>{syncSpecFromFields(p);render()};
+  document.querySelectorAll('[data-fsel]').forEach(b=>b.onclick=()=>{S.fsel=+b.dataset.fsel;render()});
+  document.querySelectorAll('[data-pv]').forEach(b=>b.onclick=()=>{S.pv=b.dataset.pv;render()});
+  document.querySelectorAll('[data-fi]').forEach(el=>{el.onchange=()=>{const f=cur.fields[+el.dataset.fi];const k=el.dataset.k;f[k]=k==='req'?el.checked:el.value;if(k==='type'&&['list of','object'].includes(f.type)&&!f.ref)f.ref=st.find(x=>x!==cur)?.name||'';rr()}});
+  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{cur.fields.splice(+b.dataset.del,1);rr()});
+  const q=(id,fn)=>{const e=document.getElementById(id);if(e)e.onclick=fn};
+  q('btnAddField',()=>{cur.fields.push({label:'',name:'new_field',type:'string',len:'',req:false,ex:'',rule:''});rr()});
+  q('btnAddStruct',()=>{const n='Struct'+(st.length+1);st.push({name:n,role:'子結構',fields:[{label:'',name:'field1',type:'string',len:'',req:true,ex:'',rule:''}]});S.fsel=st.length-1;rr()});
+  q('btnDelStruct',()=>{if(st.length<=1)return toast('至少保留一個結構');st.splice(st.indexOf(cur),1);S.fsel=0;rr()})}
+
+const CODE_SNIPPET=`CLASS zcl_zapi_po_http IMPLEMENTATION.
+  METHOD if_http_extension~handle_request.
+    DATA(lv_path) = server->request->get_header_field( '~path_info' ).
+    SPLIT lv_path AT '/' INTO TABLE DATA(lt_seg).
+    DELETE lt_seg WHERE table_line IS INITIAL.
+    DATA(lv_ebeln) = VALUE string( lt_seg[ 1 ] OPTIONAL ).
+    IF lv_ebeln NP '++++++++++' OR lv_ebeln CN '0123456789'.
+      respond_error( server = server code = 400 err = 'INVALID_EBELN' ).
+      RETURN.
+    ENDIF.
+    ...
+  ENDMETHOD.
+ENDCLASS.`;
+const FAILS=['HTTP 500 — 未處理例外','HTTP 404 — 分支漏 RETURN','status = OPEN（期望 PARTIAL）','items 為空'];
+const REVISES=['修正：404 分支漏了 RETURN，導致繼續往下序列化空結構。','修正：狀態計算把 WEMNG=0 誤判為 PARTIAL，改為先檢查全部為 0。','修正：ZPO_NOTE 寫入前未檢查 text 空白，補上 INVALID_TEXT 分支。','修正：授權檢查放錯位置，移到路由之後、讀取之前。','修正：ABAP Unit 期望值與 openapi 不一致，依 openapi 調整。'];
+
+// ---------- state (in-page simulation of the backend)
+const S={projects:[],cur:null,tab:'fields',openIt:null,fsel:0,pv:'json'};
+let rnd=mulberry(7);function mulberry(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function parseScenarios(f){return (f||'').split('\n').map(l=>l.trim()).filter(l=>l.startsWith('Scenario')).map(l=>l.replace(/^Scenario( Outline)?:\s*/,''))}
+function cp(){return S.projects.find(p=>p.id===S.cur)}
+
+function newProject(){const p={id:uid(),name:'採購單狀態查詢 API',prd:SAMPLE_PRD,glossary:SAMPLE_GLOSS,stage:'prd',spec:{openapi:'',feature:'',tech_spec:'',fields:[],frozen:false,generating:false},gates:[],runs:[],approvals:[],notes:[],created:now()};S.projects.unshift(p);S.cur=p.id;S.openIt=null;render();toast('已建立專案（已載入範例 PRD）')}
+
+// gates
+function gate(n,approve){const p=cp();const who=$(`#g${n}who`).value.trim(),note=$(`#g${n}note`).value.trim();
+  if(!who)return toast('請填「誰」通過的——人出手的紀錄是體驗的一部分');
+  if(n===1){p.prd=$('#prd').value;p.glossary=$('#glossary').value}
+  p.gates.push({gate:n,status:approve?'APPROVED':'REJECTED',who,note,ts:now()});
+  if(approve){if(n===1&&p.stage==='prd'){p.stage='spec';generateSpec(p)}else if(n===2&&p.stage==='spec'){p.spec.frozen=true;p.stage='dev'}else if(n===4&&p.stage==='release'){p.stage='done'}}
+  render()}
+function generateSpec(p){p.spec.generating=true;p.spec.feature='';p.spec.openapi='';p.spec.tech_spec='';p.spec.fields=[];render();setTimeout(()=>{p.spec.generating=false;p.spec.fields=DEFAULT_FIELDS();syncSpecFromFields(p);p.spec.feature=SPEC_FEATURE;p.spec.tech_spec=SPEC_TECH;S.tab='fields';S.fsel=0;render();toast('agent 已從 PRD 資料需求表產生欄位表、Gherkin、Tech Spec')},1600)}
+function unfreeze(){const p=cp();p.spec.frozen=false;p.gates.push({gate:2,status:'REOPENED',who:'',note:'規格解凍，回到閘門 2',ts:now()});p.stage='spec';render()}
+
+// loop
+function startLoop(){const p=cp();const scen=parseScenarios(p.spec.feature);
+  const run={id:uid(),status:'running',iteration:0,max_iter:+$('#maxIter').value||20,npl:+$('#npl').value||3,approval_mode:$('#appMode').value,poison:$('#poison').value||null,spi:(+$('#spi').value||2)*1000,history:[],iterations:[],scen_pass:0,best:0,no_progress:0,reason:'',phase:'',stop:false,started:now()};
+  p.runs.push(run);rnd=mulberry(7);render();step(p,run)}
+function stopLoop(){const r=currentRun(cp());if(r)r.stop=true}
+function currentRun(p){return p&&p.runs.length?p.runs[p.runs.length-1]:null}
+function running(r){return r&&['running','waiting_approval'].includes(r.status)}
+function verify(run,n,scen){const total=scen.length;const prev=run.scen_pass;let gain=n>1?[1,1,2,2,0][Math.floor(rnd()*5)]:1;if(n===3&&prev>1)gain=-1;
+  const cap=total-(run.poison?1:0);const passed=Math.max(0,Math.min(cap,prev+gain));const failures=[];
+  scen.forEach((s,i)=>{if(i>=passed){if(s===run.poison)failures.push({scenario:s,expected:'status 200 且 404 同時成立',actual:'矛盾的 Then — 無法同時滿足'});else failures.push({scenario:s,expected:'HTTP 200 / 欄位值符合',actual:FAILS[Math.floor(rnd()*FAILS.length)]})}});
+  // poison scenario sits last in failures only if it's genuinely the remaining one
+  if(run.poison&&passed===cap){failures.length=0;failures.push({scenario:run.poison,expected:'status 200 且 404 同時成立',actual:'矛盾的 Then — 無法同時滿足'})}
+  const ut=6+total;return{syntax_ok:n>1||rnd()>0.3,unit_pass:Math.min(ut,3+passed+Math.floor(n/2)),unit_total:ut,atc_p1:Math.max(0,2-Math.floor(n/2)),atc_p2:Math.max(0,5-n),scen_pass:passed,scen_total:total,failures}}
+function finish(p,run,status,reason){run.status=status;run.reason=reason;run.ended=now();if(status==='done')p.stage='release';render();toast(status==='done'?'迴圈完成：全綠':status==='blocked'?'迴圈 BLOCKED，等人判定':'迴圈停止')}
+function step(p,run){if(run.stop)return finish(p,run,'stopped','人工停止');if(run.iteration>=run.max_iter)return finish(p,run,'stopped',`達到回合上限 ${run.max_iter}`);
+  const n=++run.iteration;const scen=parseScenarios(p.spec.feature);const t0=Date.now();
+  const plan=n===1?'建立 ZCL_ZAPI_PO_HTTP、ZPO_NOTE 與測試類別骨架；先讓路由與 400 分支通過。':`針對目前失敗的第一條情境修正 handler；先跑測試確認失敗再改程式。`;
+  const obj=n===1?'ZCL_ZAPI_PO_HTTP + ZPO_NOTE + ZCL_ZAPI_PO_HTTP_TEST':'ZCL_ZAPI_PO_HTTP';
+  run.phase='plan';render();
+  setTimeout(()=>{run.phase='act';render();
+    const need=run.approval_mode==='every'||(run.approval_mode==='first'&&n===1);
+    const after=(decision,note)=>{
+      if(decision==='REJECTED'){const v={skipped:true,scen_pass:run.scen_pass,scen_total:scen.length,failures:[]};run.no_progress++;
+        run.iterations.push({n,plan,action:CODE_SNIPPET,verify:v,revise:`寫入被拒絕：${note||'（無說明）'}。本輪不寫入，依意見調整後下一輪重送。`,seconds:((Date.now()-t0)/1000).toFixed(1),tokens:1400});
+        if(run.no_progress>=run.npl)return finish(p,run,'blocked',`連續 ${run.no_progress} 輪無進展（寫入持續被拒）`);
+        render();return setTimeout(()=>step(p,run),400)}
+      run.phase='verify';render();
+      setTimeout(()=>{const v=verify(run,n,scen);run.scen_pass=v.scen_pass;run.history.push(v.scen_pass);
+        const revise=v.failures.length?REVISES[(n-1)%REVISES.length]:'';
+        run.iterations.push({n,plan,action:CODE_SNIPPET,verify:v,revise,seconds:((Date.now()-t0)/1000).toFixed(1),tokens:1600+Math.floor(rnd()*600)});
+        if(v.scen_pass===v.scen_total&&v.atc_p1===0&&v.syntax_ok)return finish(p,run,'done',`全綠：${v.scen_total}/${v.scen_total} 情境、ATC P1=0`);
+        if(v.scen_pass>run.best){run.best=v.scen_pass;run.no_progress=0}else run.no_progress++;
+        if(run.no_progress>=run.npl){const f=v.failures[0]||{};return finish(p,run,'blocked',`BLOCKED：連續 ${run.no_progress} 輪通過數未增加。卡住的情境：「${f.scenario||'?'}」。期望：${f.expected||''}；實際：${f.actual||''}。判斷為規格與程式矛盾或缺少資訊，需要人判定要改規格還是改程式。`)}
+        render();setTimeout(()=>step(p,run),300)},run.spi)};
+    if(need){run.status='waiting_approval';const a={id:uid(),run_id:run.id,iteration:n,object:obj,type:'CLAS',payload:CODE_SNIPPET,status:'PENDING',created:now(),_cb:(d,note)=>{run.status=run.stop?'running':'running';after(d,note)}};p.approvals.unshift(a);render()}
+    else after('APPROVED','')},500)}
+function decide(id,approve){const p=cp();const a=p.approvals.find(x=>x.id===id);if(!a||a.status!=='PENDING')return;
+  const who=$('#aw'+id).value.trim(),note=$('#an'+id).value.trim();if(!who)return toast('請填誰決定的');
+  a.status=approve?'APPROVED':'REJECTED';a.who=who;a.note=note;a.decided=now();
+  p.gates.push({gate:3,status:a.status,who,note:`${a.object}：${note}`,ts:now()});render();a._cb(a.status,note)}
+
+// ---------- render
+function render(){renderProjects();renderMain();renderApprovals();renderNotes()}
+function renderProjects(){$('#projects').innerHTML=S.projects.map(p=>`<div class="proj ${p.id===S.cur?'active':''}" data-id="${p.id}"><span class="grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span><span class="badge">${stageName(p.stage)}</span></div>`).join('')||'<div class="small muted">尚無專案</div>';
+  document.querySelectorAll('.proj').forEach(el=>el.onclick=()=>{S.cur=el.dataset.id;S.openIt=null;render()})}
+function renderMain(){const p=cp();if(!p){$('#main').innerHTML='<div class="card"><h3>開始</h3><div class="muted">按左欄「＋ 新專案」，會載入範例 PRD（採購單狀態查詢 API），然後依序走 4 個閘門。</div></div>';return}
+  const idx=STAGES.findIndex(s=>s[0]===p.stage);const g=n=>p.gates.some(x=>x.gate===n&&x.status==='APPROVED');
+  const r=currentRun(p);
+  let pipe='';STAGES.forEach((s,i)=>{pipe+=`<div class="stage ${i<idx?'past':i===idx?'cur':''}">${s[1]}</div>`;if(i<4){const n=i+1;const wait=n===3?(r&&r.status==='waiting_approval'):(idx===n-1);pipe+=`<div class="g ${g(n)?'ok':wait?'wait':''}" title="${GATES[n]}">G${n}</div>`}});
+  $('#main').innerHTML=`<div class="row"><h1 style="font-size:19px;margin:0" class="grow">${esc(p.name)}</h1><span class="badge accent">${stageName(p.stage)}</span></div>
+    <div class="pipe">${pipe}</div>${renderStage(p)}
+    <div class="card"><h3>閘門紀錄</h3>${p.gates.length?`<div class="tw"><table><tr><th>時間</th><th>閘門</th><th>結果</th><th>誰</th><th>說明</th></tr>${p.gates.map(x=>`<tr><td class="small muted">${x.ts.slice(5,16)}</td><td>G${x.gate} ${esc(GATES[x.gate])}</td><td><span class="badge ${x.status==='APPROVED'?'ok':x.status==='REJECTED'?'bad':'warn'}">${x.status}</span></td><td>${esc(x.who)}</td><td class="small">${esc(x.note)}</td></tr>`).join('')}</table></div>`:'<div class="small muted">尚無</div>'}</div>`;
+  bindMain(p)}
+function gateCard(n,desc){return `<div class="card gate"><h3>閘門 ${n} · ${esc(GATES[n])}</h3><div class="small muted" style="margin-bottom:8px">${desc}</div>
+  <div class="row"><input id="g${n}who" placeholder="誰" style="width:120px"><input id="g${n}note" class="grow" placeholder="說明（選填）"><button class="primary" data-gate="${n}" data-ok="1">通過</button><button class="danger" data-gate="${n}" data-ok="0">退回</button></div></div>`}
+function renderStage(p){switch(p.stage){
+  case 'prd':return `<div class="card"><h3>階段 0 · PRD（人寫）</h3><div class="small muted" style="margin-bottom:8px">第 6 段驗收條件請用範例寫，不要用形容詞——它會變成迴圈的終止條件。</div>
+    <div class="row" style="margin-bottom:6px"><b class="grow">PRD</b><button class="sm" id="btnSamplePrd">載入範本</button></div><textarea id="prd">${esc(p.prd)}</textarea>
+    <div class="row" style="margin:10px 0 6px"><b class="grow">業務詞彙表</b><button class="sm" id="btnSampleGloss">載入範本</button></div><textarea id="glossary" class="short">${esc(p.glossary)}</textarea></div>
+    ${gateCard(1,'PRD 定稿：PM + 開發 + Key User 開 Three Amigos，把驗收條件改成 Given/When/Then 後通過。通過後 agent 自動產生系統規格。')}`;
+  case 'spec':{const s=p.spec;const tabs={fields:'欄位表',feature:'Gherkin 情境',openapi:'OpenAPI（生成）',tech_spec:'Tech Spec'};const sc=parseScenarios(s.feature);const derived=S.tab==='openapi';return `<div class="card"><h3>階段 1 · 系統規格（agent 產生，人審）</h3>
+    ${s.generating?'<div class="banner warn">agent 產生中…（正式版走 gateway 約 30–90 秒）</div>':''}
+    <div class="tabs">${Object.keys(tabs).map(t=>`<div class="tab ${S.tab===t?'on':''}" data-tab="${t}">${tabs[t]}</div>`).join('')}</div>
+    ${S.tab==='fields'?(s.fields.length?fieldsTab(p):'<div class="muted">等 agent 產生…</div>'):`<textarea id="specText" style="min-height:340px" ${s.frozen||derived?'readonly':''}>${esc(s[S.tab])}</textarea>
+    <div class="row" style="margin-top:10px">${derived?'<span class="small muted">此檔由欄位表生成，要改請改欄位表。</span>':`<button id="btnSaveSpec" ${s.frozen?'disabled':''}>儲存此頁</button>`}<button id="btnRegen" ${s.frozen?'disabled':''}>重新產生</button><span class="grow"></span><span class="small muted">情境數：${sc.length}</span></div>
+    ${S.tab==='feature'?`<div style="margin-top:10px" class="cols">${sc.map(x=>`<div class="scen"><span class="dot"></span>${esc(x)}</div>`).join('')}</div>`:''}`}</div>
+    ${gateCard(2,'規格核准：開發審 Tech Spec，PM 審 Gherkin。通過後 feature 凍結，成為迴圈的 done 條件；要改必須回到這個閘門。')}`}
+  case 'dev':return renderDev(p,false);
+  case 'release':return renderDev(p,true)+gateCard(4,'TR 放行：全綠 + ATC 報告 + 情境結果附在 TR 審核紀錄。');
+  case 'done':return '<div class="banner ok">專案完成。放行時的結果如下。</div>'+renderDev(p,true)}}
+function renderDev(p,ro){const run=currentRun(p);const isRun=running(run);const its=run?run.iterations:[];const last=its[its.length-1];const v=last?last.verify:{};
+  const hist=run?run.history:[];const scen=parseScenarios(p.spec.feature);const total=scen.length;
+  const tokens=its.reduce((a,i)=>a+i.tokens,0),secs=its.reduce((a,i)=>a+ +i.seconds,0);
+  const passed=new Set();if(v.failures){const f=new Set(v.failures.map(x=>x.scenario));scen.forEach(s=>{if(!f.has(s))passed.add(s)})}
+  const poison=run?run.poison:null;let banner='';
+  if(run&&run.status==='blocked')banner=`<div class="banner"><b>迴圈停了（BLOCKED）</b><br>${esc(run.reason)}<br><span class="small muted">這就是終止條件在起作用：agent 不瞎做。PM 與開發判定要改規格（解凍回閘門 2）還是改程式（重啟迴圈）。</span></div>`;
+  else if(run&&run.status==='done')banner=`<div class="banner ok"><b>迴圈完成</b> · ${esc(run.reason)}</div>`;
+  else if(run&&run.status==='stopped')banner=`<div class="banner warn"><b>迴圈停止</b> · ${esc(run.reason)}</div>`;
+  else if(run&&run.status==='waiting_approval')banner=`<div class="banner warn"><b>等待寫入審批（閘門 3）</b> · 右側待審批清單 → 核准後 agent 才會把物件寫進 D01。</div>`;
+  return `${!ro&&!isRun?`<div class="card"><h3>階段 2–3 · 啟動開發/測試迴圈</h3><div class="row" style="align-items:flex-end">
+      <label class="f">回合上限<input id="maxIter" type="number" value="20" style="width:70px"></label>
+      <label class="f">無進展上限<input id="npl" type="number" value="3" style="width:64px"></label>
+      <label class="f">寫入審批<select id="appMode"><option value="first">第一輪（建物件時）</option><option value="every">每輪</option><option value="auto">自動（示範用）</option></select></label>
+      <label class="f">毒情境<select id="poison"><option value="">無</option>${scen.map(s=>`<option>${esc(s)}</option>`).join('')}</select></label>
+      <label class="f">每輪秒數<input id="spi" type="number" value="1.5" step="0.5" style="width:64px"></label>
+      <button class="primary" id="btnStart">▶ 啟動迴圈</button>${p.spec.frozen?'<button class="sm" id="btnUnfreeze">解凍規格（回閘門 2）</button>':''}</div>
+      <div class="small muted" style="margin-top:8px">LOOP.md：每輪只做一件事 → 寫入（經審批）→ 語法 / ABAP Unit / ATC / 情境 → 失敗帶實際值回修。停止：全綠、連續 N 輪無進展、回合上限。</div></div>`:''}
+    ${banner}
+    <div class="card"><div class="row"><h3 class="grow" style="margin:0">迴圈儀表板 ${run?`<span class="badge ${run.status==='done'?'ok':run.status==='blocked'?'blocked':isRun?'warn':''}">${run.status}</span>`:''}</h3>
+      ${isRun?`<span class="phase">第 ${run.iteration} 輪 · ${run.phase}</span><button class="danger sm" id="btnStop">停止</button>`:''}</div>
+      <div class="kpi"><div><b>${run?run.iteration:0}<small> / ${run?run.max_iter:'–'}</small></b><span>回合</span></div>
+        <div><b>${v.scen_pass??0}<small> / ${total}</small></b><span>情境通過</span></div>
+        <div><b>${v.unit_pass??'–'}<small> / ${v.unit_total??'–'}</small></b><span>ABAP Unit</span></div>
+        <div><b>${v.atc_p1??'–'}<small> P1 · ${v.atc_p2??'–'} P2</small></b><span>ATC</span></div></div>
+      ${svgChart(hist,total)}
+      <div class="row small muted"><span>Token（估）${tokens.toLocaleString()}</span><span>· 耗時 ${secs.toFixed(0)}s</span><span>· 人工介入 ${p.gates.filter(g=>g.gate===3).length} 次（閘門 3）</span></div>
+      <div class="cols" style="margin-top:10px">${scen.map(s=>`<div class="scen"><span class="dot ${s===poison?'poison':passed.has(s)?'ok':last?'bad':''}"></span>${esc(s)}${s===poison?' <span class="badge blocked">毒</span>':''}</div>`).join('')}</div></div>
+    <div class="card"><h3>迴圈紀錄（點開看每輪）</h3>${its.length?`<div class="tw"><table><tr><th>#</th><th>Plan</th><th>驗證</th><th>Revise</th><th>秒</th></tr>${its.map(i=>`
+      <tr class="it" data-n="${i.n}"><td>${i.n}</td><td class="small">${esc(i.plan).slice(0,48)}…</td>
+      <td>${i.verify.skipped?'<span class="badge warn">未寫入</span>':`<span class="badge ${i.verify.scen_pass===i.verify.scen_total?'ok':''}">${i.verify.scen_pass}/${i.verify.scen_total}</span> ${i.verify.syntax_ok===false?'<span class="badge bad">語法</span>':''} ${i.verify.atc_p1?`<span class="badge bad">P1×${i.verify.atc_p1}</span>`:''}`}</td>
+      <td class="small">${esc(i.revise).slice(0,60)}</td><td class="small muted">${i.seconds}</td></tr>
+      ${S.openIt===i.n?`<tr class="detail"><td colspan="5"><b>Plan</b>\n${esc(i.plan)}\n\n<b>Action（程式片段）</b>\n${esc(i.action)}\n\n<b>Verify</b>\n${esc(JSON.stringify(i.verify,null,1))}\n\n<b>Revise</b>\n${esc(i.revise)}</td></tr>`:''}`).join('')}</table></div>`:'<div class="small muted">尚未執行</div>'}</div>`}
+function svgChart(hist,total){const W=640,H=150,pl=34,pb=24,n=Math.max(hist.length,2);const x=i=>pl+(i/(n-1))*(W-pl-14),y=v=>H-pb-(total?v/total:0)*(H-pb-18);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-height:170px;display:block;margin:4px 0 8px" role="img" aria-label="情境通過數曲線">
+    <line x1="${pl}" y1="${y(0)}" x2="${W-14}" y2="${y(0)}" stroke="var(--line)"/>
+    <line x1="${pl}" y1="${y(total)}" x2="${W-14}" y2="${y(total)}" stroke="var(--ok)" stroke-dasharray="4 4"/>
+    <text x="${pl-6}" y="${y(total)+4}" text-anchor="end">${total}</text><text x="${pl-6}" y="${y(0)+4}" text-anchor="end">0</text>
+    <text x="${W-14}" y="${y(total)-5}" text-anchor="end" fill="var(--ok)">done 條件</text>
+    ${hist.length?`<polyline fill="none" stroke="var(--accent)" stroke-width="2" points="${hist.map((v,i)=>`${x(i)},${y(v)}`).join(' ')}"/>`:''}
+    ${hist.map((v,i)=>`<circle cx="${x(i)}" cy="${y(v)}" r="3.5" fill="var(--accent)"/><text x="${x(i)}" y="${H-6}" text-anchor="middle">${i+1}</text>`).join('')}
+    <text x="${pl}" y="12">情境通過數 / 回合</text></svg>`}
+function bindMain(p){document.querySelectorAll('[data-gate]').forEach(b=>b.onclick=()=>gate(+b.dataset.gate,b.dataset.ok==='1'));
+  document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{S.tab=t.dataset.tab;render()});
+  document.querySelectorAll('tr.it').forEach(t=>t.onclick=()=>{const n=+t.dataset.n;S.openIt=S.openIt===n?null:n;render()});
+  const q=(id,fn)=>{const e=document.getElementById(id);if(e)e.onclick=fn};
+  q('btnSamplePrd',()=>$('#prd').value=SAMPLE_PRD);q('btnSampleGloss',()=>$('#glossary').value=SAMPLE_GLOSS);
+  q('btnSaveSpec',()=>{p.spec[S.tab]=$('#specText').value;render();toast('已儲存')});q('btnRegen',()=>generateSpec(p));
+  q('btnStart',startLoop);q('btnStop',stopLoop);q('btnUnfreeze',unfreeze);
+  if(p.stage==='spec'&&S.tab==='fields'&&p.spec.fields.length)bindFields(p);
+  const prd=$('#prd'),gl=$('#glossary');if(prd)prd.oninput=()=>p.prd=prd.value;if(gl)gl.oninput=()=>p.glossary=gl.value}
+function renderApprovals(){const p=cp();const a=p?p.approvals.filter(x=>x.status==='PENDING'):[];const c=$('#pendingCount');c.hidden=!a.length;c.textContent=a.length;
+  $('#approvals').innerHTML=a.length?a.map(x=>`<div class="appr"><div class="row"><b class="grow">${esc(x.object)}</b><span class="badge warn">第 ${x.iteration} 輪</span></div><div class="small muted">${x.type} · ${x.created.slice(11,16)}</div><pre>${esc(x.payload)}</pre>
+    <input id="aw${x.id}" placeholder="誰" style="margin-bottom:4px"><input id="an${x.id}" placeholder="意見（拒絕時 agent 會看到）" style="margin-bottom:6px">
+    <div class="row"><button class="primary" data-ap="${x.id}" data-ok="1">核准寫入</button><button class="danger" data-ap="${x.id}" data-ok="0">拒絕</button></div></div>`).join(''):'<span class="small muted">無</span>';
+  document.querySelectorAll('[data-ap]').forEach(b=>b.onclick=()=>decide(b.dataset.ap,b.dataset.ok==='1'))}
+function renderNotes(){const p=cp();$('#notes').innerHTML=(p?p.notes:[]).map(n=>`<div class="note"><b>${esc(n.role)}</b>${esc(n.text)}<div class="small muted">${n.ts.slice(5,16)}</div></div>`).join('')||'<span class="small muted">觀察員在這裡記「如果是我會怎麼做、agent 做了什麼不一樣」</span>'}
+$('#btnNew').onclick=newProject;
+$('#noteText').onkeydown=e=>{if(e.key!=='Enter')return;const p=cp();if(!p)return toast('先選專案');const t=$('#noteText').value.trim();if(!t)return;p.notes.push({role:$('#noteRole').value,text:t,ts:now()});$('#noteText').value='';renderNotes()};
+newProject();
+</script>
