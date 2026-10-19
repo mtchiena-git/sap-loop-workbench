@@ -21,6 +21,12 @@ uvicorn app:app --host 0.0.0.0 --port 8080
 | G3 寫入 D01 審批 | 開發 | 每次寫入先 PENDING，核准才寫；拒絕時意見會餵回 agent |
 | G4 TR 放行 | Team Lead | 全綠 + ATC + 情境結果 |
 
+## 退回上一步
+每個階段都可退回前一階段（spec→prd、dev→spec、release→dev、done→release）。
+退回需填「誰」與原因，記錄在閘門紀錄為 `ROLLBACK`；內容一律保留（PRD、欄位表、Gherkin、迴圈紀錄），
+退回到 spec/prd 會自動解凍規格。迴圈執行中不能退回，要先停止。
+API：`POST /api/projects/{id}/rollback {who, note, to?}`。
+
 ## 迴圈（LOOP.md）
 每輪：Plan → Act → 寫入（經 G3）→ Verify（語法 / ABAP Unit / ATC / 情境）→ Revise。
 停止：全綠；連續 N 輪無進展（寫 BLOCKED）；回合上限。

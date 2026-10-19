@@ -418,10 +418,25 @@ function gate(n,approve){const p=cp();const who=$(`#g${n}who`).value.trim(),note
   if(!who)return toast('請填「誰」通過的——人出手的紀錄是體驗的一部分');
   if(n===1){p.prd=$('#prd').value;p.glossary=$('#glossary').value}
   p.gates.push({gate:n,status:approve?'APPROVED':'REJECTED',who,note,ts:now()});
-  if(approve){if(n===1&&p.stage==='prd'){p.stage='spec';generateSpec(p)}else if(n===2&&p.stage==='spec'){p.spec.frozen=true;p.stage='dev'}else if(n===4&&p.stage==='release'){p.stage='done'}}
+  if(approve){if(n===1&&p.stage==='prd'){p.stage='spec';if(p.spec.fields.length){S.tab='fields';toast('沿用既有規格；需要重生請按「重新產生」')}else generateSpec(p)}else if(n===2&&p.stage==='spec'){p.spec.frozen=true;p.stage='dev'}else if(n===4&&p.stage==='release'){p.stage='done'}}
   render()}
 function generateSpec(p){p.spec.generating=true;p.spec.feature='';p.spec.openapi='';p.spec.tech_spec='';p.spec.fields=[];render();setTimeout(()=>{p.spec.generating=false;p.spec.fields=DEFAULT_FIELDS();syncSpecFromFields(p);p.spec.feature=SPEC_FEATURE;p.spec.tech_spec=SPEC_TECH;S.tab='fields';S.fsel=0;render();toast('agent 已從 PRD 資料需求表產生欄位表、Gherkin、Tech Spec')},1600)}
-function unfreeze(){const p=cp();p.spec.frozen=false;p.gates.push({gate:2,status:'REOPENED',who:'',note:'規格解凍，回到閘門 2',ts:now()});p.stage='spec';render()}
+function unfreeze(){S.rb=true;render();$('#rbNote')&&($('#rbNote').value='規格解凍，回到閘門 2');$('#rbWho')?.focus()}
+// ---------- rollback: any stage → previous stage, content preserved, reason logged
+const PREV={spec:'prd',dev:'spec',release:'dev',done:'release'};
+function rollback(target,presetNote){const p=cp();const from=p.stage;const to=target||PREV[from];if(!to)return;
+  const who=($('#rbWho')?.value||'').trim(),note=presetNote||($('#rbNote')?.value||'').trim();
+  if(!who&&!presetNote)return toast('請填誰退回的');if(!note)return toast('請寫退回原因，紀錄會留在閘門紀錄');
+  const r=currentRun(p);if(running(r))return toast('迴圈執行中，請先停止再退回');
+  // stage-specific side effects
+  if(from==='dev'||from==='release'||from==='done'){if(to==='spec'||to==='prd')p.spec.frozen=false}
+  const gateOf={prd:1,spec:2,dev:3,release:4};
+  p.gates.push({gate:gateOf[to]||0,status:'ROLLBACK',who,note:`${stageName(from)} → ${stageName(to)}：${note}`,ts:now()});
+  p.stage=to;if(to==='spec')S.tab='fields';S.rb=false;render();toast(`已退回到「${stageName(to)}」`)}
+function rollbackCard(p){const to=PREV[p.stage];if(!to)return '';const r=currentRun(p);
+  const hint={spec:'回到 PRD 修改；規格內容保留，改完 PRD 後可按「重新產生」或直接沿用再過 G1。',dev:'規格解凍，可改欄位表 / Gherkin；迴圈紀錄保留，改完再過 G2 重啟迴圈。',release:'回到迴圈階段；可重啟迴圈或調整後再放行。',done:'回到放行階段重新審核。'}[p.stage];
+  return `<div class="card" style="border-style:dashed"><div class="row"><h3 class="grow" style="margin:0">↩ 退回上一步（${stageName(p.stage)} → ${stageName(to)}）</h3>${S.rb?'':`<button class="sm" id="btnRbOpen" ${running(r)?'disabled title="迴圈執行中"':''}>退回</button>`}</div>
+    ${S.rb?`<div class="small muted" style="margin:6px 0 8px">${hint}</div><div class="row"><input id="rbWho" placeholder="誰" style="width:120px"><input id="rbNote" class="grow" placeholder="退回原因（必填，會留在閘門紀錄）"><button class="danger" id="btnRbGo">確認退回</button><button class="sm" id="btnRbCancel">取消</button></div>`:''}</div>`}
 
 // loop
 function startLoop(){const p=cp();const scen=parseScenarios(p.spec.feature);
@@ -473,8 +488,8 @@ function renderMain(){const p=cp();if(!p){$('#main').innerHTML='<div class="card
   const r=currentRun(p);
   let pipe='';STAGES.forEach((s,i)=>{pipe+=`<div class="stage ${i<idx?'past':i===idx?'cur':''}">${s[1]}</div>`;if(i<4){const n=i+1;const wait=n===3?(r&&r.status==='waiting_approval'):(idx===n-1);pipe+=`<div class="g ${g(n)?'ok':wait?'wait':''}" title="${GATES[n]}">G${n}</div>`}});
   $('#main').innerHTML=`<div class="row"><h1 style="font-size:19px;margin:0" class="grow">${esc(p.name)}</h1><span class="badge accent">${stageName(p.stage)}</span></div>
-    <div class="pipe">${pipe}</div>${renderStage(p)}
-    <div class="card"><h3>閘門紀錄</h3>${p.gates.length?`<div class="tw"><table><tr><th>時間</th><th>閘門</th><th>結果</th><th>誰</th><th>說明</th></tr>${p.gates.map(x=>`<tr><td class="small muted">${x.ts.slice(5,16)}</td><td>G${x.gate} ${esc(GATES[x.gate])}</td><td><span class="badge ${x.status==='APPROVED'?'ok':x.status==='REJECTED'?'bad':'warn'}">${x.status}</span></td><td>${esc(x.who)}</td><td class="small">${esc(x.note)}</td></tr>`).join('')}</table></div>`:'<div class="small muted">尚無</div>'}</div>`;
+    <div class="pipe">${pipe}</div>${renderStage(p)}${rollbackCard(p)}
+    <div class="card"><h3>閘門紀錄</h3>${p.gates.length?`<div class="tw"><table><tr><th>時間</th><th>閘門</th><th>結果</th><th>誰</th><th>說明</th></tr>${p.gates.map(x=>`<tr><td class="small muted">${x.ts.slice(5,16)}</td><td>${x.gate?`G${x.gate} ${esc(GATES[x.gate])}`:'—'}</td><td><span class="badge ${x.status==='APPROVED'?'ok':x.status==='REJECTED'?'bad':x.status==='ROLLBACK'?'blocked':'warn'}">${x.status}</span></td><td>${esc(x.who)}</td><td class="small">${esc(x.note)}</td></tr>`).join('')}</table></div>`:'<div class="small muted">尚無</div>'}</div>`;
   bindMain(p)}
 function gateCard(n,desc){return `<div class="card gate"><h3>閘門 ${n} · ${esc(GATES[n])}</h3><div class="small muted" style="margin-bottom:8px">${desc}</div>
   <div class="row"><input id="g${n}who" placeholder="誰" style="width:120px"><input id="g${n}note" class="grow" placeholder="說明（選填）"><button class="primary" data-gate="${n}" data-ok="1">通過</button><button class="danger" data-gate="${n}" data-ok="0">退回</button></div></div>`}
@@ -542,6 +557,7 @@ function bindMain(p){document.querySelectorAll('[data-gate]').forEach(b=>b.oncli
   q('btnSaveSpec',()=>{p.spec[S.tab]=$('#specText').value;render();toast('已儲存')});q('btnRegen',()=>generateSpec(p));
   q('btnStart',startLoop);q('btnStop',stopLoop);q('btnUnfreeze',unfreeze);
   if(p.stage==='spec'&&S.tab==='fields'&&p.spec.fields.length)bindFields(p);
+  q('btnRbOpen',()=>{S.rb=true;render();$('#rbWho')?.focus()});q('btnRbCancel',()=>{S.rb=false;render()});q('btnRbGo',()=>rollback());
   const prd=$('#prd'),gl=$('#glossary');if(prd)prd.oninput=()=>p.prd=prd.value;if(gl)gl.oninput=()=>p.glossary=gl.value}
 function renderApprovals(){const p=cp();const a=p?p.approvals.filter(x=>x.status==='PENDING'):[];const c=$('#pendingCount');c.hidden=!a.length;c.textContent=a.length;
   $('#approvals').innerHTML=a.length?a.map(x=>`<div class="appr"><div class="row"><b class="grow">${esc(x.object)}</b><span class="badge warn">第 ${x.iteration} 輪</span></div><div class="small muted">${x.type} · ${x.created.slice(11,16)}</div><pre>${esc(x.payload)}</pre>

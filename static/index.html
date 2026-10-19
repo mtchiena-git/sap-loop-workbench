@@ -135,8 +135,8 @@ function render(){
       <span class="badge accent">${stageName(P.stage)}</span>
       <button class="small" onclick="delProject()">刪除</button></div>
     <div class="pipe">${pipe}</div>
-    ${renderStage()}
-    <div class="card"><h3>閘門紀錄</h3>${P.gates.length?`<table><tr><th>時間</th><th>閘門</th><th>結果</th><th>誰</th><th>說明</th></tr>${P.gates.map(x=>`<tr><td class="small muted">${x.ts.slice(5,16)}</td><td>G${x.gate} ${esc(cfg.gates[x.gate])}</td><td><span class="badge ${x.status==='APPROVED'?'ok':x.status==='REJECTED'?'bad':'warn'}">${x.status}</span></td><td>${esc(x.who)}</td><td class="small">${esc(x.note)}</td></tr>`).join('')}</table>`:'<div class="small muted">尚無</div>'}</div>`;
+    ${renderStage()}${rollbackCard()}
+    <div class="card"><h3>閘門紀錄</h3>${P.gates.length?`<table><tr><th>時間</th><th>閘門</th><th>結果</th><th>誰</th><th>說明</th></tr>${P.gates.map(x=>`<tr><td class="small muted">${x.ts.slice(5,16)}</td><td>${x.gate?`G${x.gate} ${esc(cfg.gates[x.gate])}`:'—'}</td><td><span class="badge ${x.status==='APPROVED'?'ok':x.status==='REJECTED'?'bad':x.status==='ROLLBACK'?'blocked':'warn'}">${x.status}</span></td><td>${esc(x.who)}</td><td class="small">${esc(x.note)}</td></tr>`).join('')}</table>`:'<div class="small muted">尚無</div>'}</div>`;
 }
 function renderStage(){
   switch(P.stage){
@@ -232,7 +232,13 @@ function loadSample(k){if(k==='prd')$('#prd').value=samples['PRD_po_status_api.m
 async function gate(n,approve){if(n===1)await savePrd();const who=$(`#g${n}who`).value,note=$(`#g${n}note`).value;if(!who)return alert('請填誰通過的——人出手的紀錄是體驗的一部分');await api(`/projects/${cur}/gate/${n}`,'POST',{who,note,approve});refresh();loadProjects()}
 async function saveSpec(){const b={};b[tab]=$('#specText').value;await api('/projects/'+cur+'/spec','PATCH',b);refresh()}
 async function regen(){await api('/projects/'+cur+'/spec/regenerate','POST');refresh()}
-async function unfreeze(){if(!confirm('解凍會回到閘門 2，並留下紀錄。確定？'))return;await api('/projects/'+cur+'/spec/unfreeze','POST');refresh();loadProjects()}
+const PREV={spec:'prd',dev:'spec',release:'dev',done:'release'};let rbOpen=false;
+function unfreeze(){rbOpen=true;render();const n=$('#rbNote');if(n)n.value='規格解凍，回到閘門 2';$('#rbWho')?.focus()}
+function rollbackCard(){const to=PREV[P.stage];if(!to)return '';const isRun=run&&['running','waiting_approval'].includes(run.status);
+  const hint={spec:'回到 PRD 修改；規格內容保留，改完後再過 G1（不會自動重生，需要時按「重新產生」）。',dev:'規格解凍，可改 Gherkin / OpenAPI / Tech Spec；迴圈紀錄保留，改完再過 G2 重啟迴圈。',release:'回到迴圈階段；可重啟迴圈或調整後再放行。',done:'回到放行階段重新審核。'}[P.stage];
+  return `<div class="card" style="border-style:dashed"><div class="row"><h3 class="grow" style="margin:0">↩ 退回上一步（${stageName(P.stage)} → ${stageName(to)}）</h3>${rbOpen?'':`<button class="small" onclick="rbOpen=true;render();$('#rbWho')?.focus()" ${isRun?'disabled title="迴圈執行中"':''}>退回</button>`}</div>
+    ${rbOpen?`<div class="small muted" style="margin:6px 0 8px">${hint}</div><div class="row"><input id="rbWho" placeholder="誰" style="width:120px"><input id="rbNote" class="grow" placeholder="退回原因（必填，會留在閘門紀錄）"><button class="danger" onclick="doRollback()">確認退回</button><button class="small" onclick="rbOpen=false;render()">取消</button></div>`:''}</div>`}
+async function doRollback(){const who=$('#rbWho').value.trim(),note=$('#rbNote').value.trim();if(!who||!note)return alert('請填誰退回、以及原因');await api('/projects/'+cur+'/rollback','POST',{who,note});rbOpen=false;tab='feature';refresh();loadProjects()}
 async function startLoop(){await api(`/projects/${cur}/loop/start`,'POST',{max_iter:+$('#maxIter').value,no_progress_limit:+$('#npl').value,approval_mode:$('#appMode').value,poison_scenario:$('#poison').value,seconds_per_iter:+$('#spi').value});refresh()}
 async function stopLoop(){await api('/runs/'+run.id+'/stop','POST')}
 async function delProject(){if(!confirm('刪除專案與所有紀錄？'))return;await api('/projects/'+cur,'DELETE');cur=null;P=null;$('#main').innerHTML='<div class="muted">選一個專案。</div>';loadProjects()}

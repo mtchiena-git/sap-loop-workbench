@@ -216,7 +216,8 @@ def pass_gate(pid: str, gate: int, g: GateIn):
         return get_project(pid)
     if gate == 1 and p["stage"] == "prd":
         set_stage(pid, "spec")
-        threading.Thread(target=generate_spec, args=(pid,), daemon=True).start()
+        if not (p["spec"] and p["spec"]["feature"]):   # keep an existing spec after a rollback
+            threading.Thread(target=generate_spec, args=(pid,), daemon=True).start()
     elif gate == 2 and p["stage"] == "spec":
         with db() as c:
             c.execute("UPDATE spec SET frozen=1 WHERE project_id=?", (pid,))
@@ -271,13 +272,49 @@ def patch_spec(pid: str, s: SpecPatch):
     return get_project(pid)["spec"]
 
 
+PREV_STAGE = {"spec": "prd", "dev": "spec", "release": "dev", "done": "release"}
+STAGE_GATE = {"prd": 1, "spec": 2, "dev": 3, "release": 4}
+
+
+class RollbackIn(BaseModel):
+    who: str
+    note: str
+    to: Optional[str] = None   # default: previous stage
+
+
+@app.post("/api/projects/{pid}/rollback")
+def rollback(pid: str, r: RollbackIn):
+    """Go back one stage (or to an earlier one). Content is preserved; reason is logged."""
+    p = get_project(pid)
+    frm = p["stage"]
+    to = r.to or PREV_STAGE.get(frm)
+    if not to:
+        raise HTTPException(400, "已在第一個階段，無法再退回。")
+    if STAGES.index(to) >= STAGES.index(frm):
+        raise HTTPException(400, "只能退回到更早的階段。")
+    if not r.who.strip() or not r.note.strip():
+        raise HTTPException(400, "退回需要填「誰」與原因。")
+    for run in p["runs"]:
+        if run["status"] in ("running", "waiting_approval"):
+            raise HTTPException(400, "迴圈執行中，請先停止再退回。")
+    with db() as c:
+        if to in ("prd", "spec"):
+            c.execute("UPDATE spec SET frozen=0 WHERE project_id=?", (pid,))
+        c.execute("INSERT INTO gate(project_id,gate,status,who,note,ts) VALUES(?,?,?,?,?,?)",
+                  (pid, STAGE_GATE.get(to, 0), "ROLLBACK", r.who,
+                   f"{frm} → {to}：{r.note}", now()))
+    set_stage(pid, to)
+    emit("gate", pid, {"gate": STAGE_GATE.get(to, 0), "status": "ROLLBACK", "who": r.who, "note": r.note})
+    return get_project(pid)
+
+
 @app.post("/api/projects/{pid}/spec/unfreeze")
 def unfreeze_spec(pid: str):
-    """Go back to gate 2 (explicit, logged)."""
+    """Backward-compatible alias: dev → spec without a reason form."""
     with db() as c:
         c.execute("UPDATE spec SET frozen=0 WHERE project_id=?", (pid,))
         c.execute("INSERT INTO gate(project_id,gate,status,who,note,ts) VALUES(?,?,?,?,?,?)",
-                  (pid, 2, "REOPENED", "", "規格解凍，回到閘門 2", now()))
+                  (pid, 2, "ROLLBACK", "", "dev → spec：規格解凍，回到閘門 2", now()))
     set_stage(pid, "spec")
     return get_project(pid)
 
