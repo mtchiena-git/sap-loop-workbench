@@ -82,6 +82,8 @@ svg text{font-family:var(--sans);font-size:11px;fill:var(--muted)}
   <h2>專案</h2>
   <div id="projects"></div>
   <button class="primary" style="width:100%;margin-top:8px" onclick="newProject()">＋ 新專案</button>
+  <button style="width:100%;margin-top:6px" onclick="impOpen=!impOpen;renderImport()">⇩ 從既有服務匯入</button>
+  <div id="importBox"></div>
   <h2>體驗提示</h2>
   <div class="small muted">
     人只在 4 個閘門出手，其餘讓迴圈跑。<br><br>
@@ -112,7 +114,7 @@ let P=null, cur=null, run=null, tab='feature', openIt=null, samples={}, cfg={};
 
 async function boot(){
   cfg=await api('/config');samples=await api('/samples');
-  $('#cfg').textContent=`LLM: ${cfg.llm} · Executor: ${cfg.executor}`;
+  $('#cfg').textContent=`LLM: ${cfg.llm} · Executor: ${cfg.executor} · Extractor: ${cfg.extractor}`;
   await loadProjects();
   const es=new EventSource('/api/events');
   es.onmessage=e=>{const ev=JSON.parse(e.data);if(ev.kind==='hello')return;
@@ -123,6 +125,21 @@ async function loadProjects(){const ps=await api('/projects');$('#projects').inn
 const stageName=s=>(STAGES.find(x=>x[0]===s)||[,s])[1];
 async function newProject(){const name=prompt('專案名稱','採購單狀態查詢 API');if(!name)return;const p=await api('/projects','POST',{name,prd:samples['PRD_po_status_api.md']||'',glossary:samples['glossary.md']||''});await loadProjects();open(p.id)}
 async function open(id){cur=id;openIt=null;await refresh();loadProjects()}
+let impOpen=false,impPreview=null;
+function renderImport(){$('#importBox').innerHTML=impOpen?`<div class="card" style="margin-top:8px;padding:10px">
+  <div class="small muted" style="margin-bottom:6px">走 MCP / ADT 讀既有 handler，反推端點表與欄位表，專案直接從「系統規格」開始。</div>
+  <input id="impNode" placeholder="SICF 節點，如 /sap/bc/zapi/po" style="margin-bottom:4px">
+  <input id="impClass" placeholder="或 handler class，如 ZCL_ZAPI_PO_HTTP" style="margin-bottom:4px">
+  <select id="impStyle" style="margin-bottom:6px"><option value="snake">JSON 欄位：snake_case（/ui2/cl_json low_case）</option><option value="camel">JSON 欄位：camelCase</option></select>
+  <div class="row"><button class="small" onclick="impDry()">預覽</button><button class="primary small" onclick="impGo()">匯入</button></div>
+  ${impPreview?`<div class="small" style="margin-top:8px">${impPreview.error?`<span style="color:var(--bad)">${esc(impPreview.error)}</span>`:`來源 ${esc(impPreview.source)} · handler ${impPreview.handlers.join(', ')}<br>端點 ${impPreview.stats.endpoints}、結構 ${impPreview.stats.structs}<br>${impPreview.endpoints.map(e=>`<code>${e.method} ${esc(e.path)}</code>`).join('<br>')}`}</div>`:''}</div>`:''}
+async function impDry(){const node=$('#impNode').value.trim(),clazz=$('#impClass').value.trim();try{impPreview=await api(`/extract/preview?node=${encodeURIComponent(node)}&clazz=${encodeURIComponent(clazz)}&json_style=${$('#impStyle').value}`)}catch(e){impPreview={error:e.message}}renderImport()}
+async function impGo(){const node=$('#impNode').value.trim(),clazz=$('#impClass').value.trim();if(!node&&!clazz)return alert('請填 SICF 節點或 class');const p=await api('/projects/import','POST',{node,clazz,json_style:$('#impStyle').value});impOpen=false;impPreview=null;renderImport();await loadProjects();open(p.id)}
+function specTables(s){if(!(s.endpoints||[]).length&&!(s.fields||[]).length)return '';
+  const eps=(s.endpoints||[]).map(e=>`<tr><td><code>${e.method}</code></td><td><code>${esc(e.path)}</code></td><td class="small">${e.params.map(p=>`${esc(p.name)}<span class="muted">:${p.in}</span>`).join(', ')||'—'}</td><td>${esc(e.body)||'—'}</td><td>${e.ok} → ${esc(e.resp)||'—'}</td><td class="small">${esc(e.errors)}</td><td class="small">${esc(e.auth)}</td><td class="small muted">${esc(e.src||'')}</td></tr>`).join('');
+  const fs=(s.fields||[]).map(st=>`<tr><td><b>${esc(st.name)}</b><div class="small muted">${esc(st.role)}</div></td><td class="small">${st.fields.map(f=>`<span style="white-space:nowrap">${f.label?esc(f.label)+' ':'<span class="badge warn" title="業務名待補">?</span> '}<code>${esc(f.name)}</code>:${f.type}${f.ref?' '+esc(f.ref):''}${f.len?'('+f.len+')':''}</span>`).join('　')}</td></tr>`).join('');
+  return `<h3 style="margin-top:14px">端點表 <span class="small muted">（反推草稿，正式版在 prototype 可編輯）</span></h3><div style="overflow-x:auto"><table><tr><th>方法</th><th>路徑</th><th>參數</th><th>Body</th><th>回應</th><th>錯誤碼</th><th>授權</th><th>來源</th></tr>${eps||'<tr><td colspan="8" class="muted small">無</td></tr>'}</table></div>
+  <h3 style="margin-top:14px">欄位表 <span class="small muted">（<span class="badge warn">?</span> = 業務名待 PM 補）</span></h3><div style="overflow-x:auto"><table><tr><th>結構</th><th>欄位</th></tr>${fs||'<tr><td colspan="2" class="muted small">無</td></tr>'}</table></div>`}
 async function refresh(){if(!cur)return;P=await api('/projects/'+cur);const active=P.runs.filter(r=>r.status!=='error').slice(-1)[0];run=active?await api('/runs/'+active.id):null;render();loadApprovals();renderNotes()}
 
 function render(){
@@ -149,9 +166,11 @@ function renderStage(){
         <textarea id="glossary" class="short">${esc(P.glossary)}</textarea>
         <div class="row" style="margin-top:10px"><button onclick="savePrd()">儲存</button></div></div>
       ${gateCard(1,'PRD 定稿：PM + 開發 + Key User 開 Three Amigos，把驗收條件改成 Given/When/Then 後通過。通過後 agent 自動產生系統規格。')}`;
-    case 'spec':{const s=P.spec;const gen=!s.feature&&!s.openapi;return `
+    case 'spec':{const s=P.spec;const gen=!s.feature&&!s.openapi;const imp=s.origin?JSON.parse(s.origin):null;return `
       <div class="card"><h3>階段 1 · 系統規格（agent 產生，人審）</h3>
+        ${imp?`<div class="banner" style="border-color:var(--accent)"><b>從既有服務匯入</b> · ${esc(imp.node||imp.class)} · handler ${imp.handlers.join(', ')} · 來源 ${imp.source}<br><span class="small muted">Gherkin 為 characterization（現況行為）。PM 補欄位業務名與 PRD 業務意義；審時標出「現況錯、期望應為 X」的條目。G2 通過後第一次迴圈請用基準模式。</span></div>`:''}
         ${gen?'<div class="banner">agent 產生中…（gateway 模式約 30–90 秒）</div>':''}
+        ${specTables(s)}
         <div class="tabs">${['feature','openapi','tech_spec'].map(t=>`<div class="tab ${tab===t?'on':''}" onclick="tab='${t}';render()">${{feature:'Gherkin 情境',openapi:'OpenAPI',tech_spec:'Tech Spec'}[t]}</div>`).join('')}</div>
         <textarea id="specText" style="min-height:360px">${esc(s[tab])}</textarea>
         <div class="row" style="margin-top:10px"><button onclick="saveSpec()">儲存此頁</button><button onclick="regen()">重新產生</button>

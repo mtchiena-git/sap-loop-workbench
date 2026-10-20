@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from executor import get_executor
+from extractor import extract, get_source
 from llm import get_llm
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -51,7 +52,8 @@ def init_db():
           stage TEXT DEFAULT 'prd', settings TEXT DEFAULT '{}', created TEXT);
         CREATE TABLE IF NOT EXISTS spec(
           project_id TEXT PRIMARY KEY, openapi TEXT DEFAULT '', feature TEXT DEFAULT '',
-          tech_spec TEXT DEFAULT '', frozen INTEGER DEFAULT 0, updated TEXT);
+          tech_spec TEXT DEFAULT '', frozen INTEGER DEFAULT 0, updated TEXT,
+          endpoints TEXT DEFAULT '[]', fields TEXT DEFAULT '[]', origin TEXT DEFAULT '');
         CREATE TABLE IF NOT EXISTS gate(
           id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, gate INTEGER,
           status TEXT, who TEXT, note TEXT, ts TEXT);
@@ -70,6 +72,10 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, role TEXT,
           text TEXT, ts TEXT);
         """)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(spec)")}
+        for col, ddl in (("endpoints", "TEXT DEFAULT '[]'"), ("fields", "TEXT DEFAULT '[]'"), ("origin", "TEXT DEFAULT ''")):
+            if col not in cols:
+                c.execute(f"ALTER TABLE spec ADD COLUMN {col} {ddl}")
 
 
 init_db()
@@ -108,6 +114,15 @@ class SpecPatch(BaseModel):
     openapi: Optional[str] = None
     feature: Optional[str] = None
     tech_spec: Optional[str] = None
+    endpoints: Optional[list] = None
+    fields: Optional[list] = None
+
+
+class ImportIn(BaseModel):
+    name: str = ""
+    node: str = ""          # SICF node, e.g. /sap/bc/zapi/po
+    clazz: str = ""         # or a handler class name
+    json_style: str = "snake"   # snake | camel  (how /ui2/cl_json names fields)
 
 
 class GateIn(BaseModel):
@@ -161,6 +176,12 @@ def get_project(pid: str):
             raise HTTPException(404)
         p["settings"] = json.loads(p["settings"] or "{}")
         p["spec"] = row(c.execute("SELECT * FROM spec WHERE project_id=?", (pid,)).fetchone())
+        if p["spec"]:
+            for k in ("endpoints", "fields"):
+                try:
+                    p["spec"][k] = json.loads(p["spec"][k] or "[]")
+                except Exception:
+                    p["spec"][k] = []
         p["gates"] = [row(r) for r in c.execute("SELECT * FROM gate WHERE project_id=? ORDER BY id", (pid,))]
         p["runs"] = [row(r) for r in c.execute("SELECT * FROM run WHERE project_id=? ORDER BY started", (pid,))]
         p["approvals"] = [row(r) for r in c.execute(
@@ -265,11 +286,67 @@ def patch_spec(pid: str, s: SpecPatch):
         raise HTTPException(400, "規格已凍結：迴圈的終止條件不能在迴圈中更動。")
     with db() as c:
         cur = p["spec"]
-        c.execute("UPDATE spec SET openapi=?,feature=?,tech_spec=?,updated=? WHERE project_id=?",
+        c.execute("UPDATE spec SET openapi=?,feature=?,tech_spec=?,endpoints=?,fields=?,updated=? WHERE project_id=?",
                   (s.openapi if s.openapi is not None else cur["openapi"],
                    s.feature if s.feature is not None else cur["feature"],
-                   s.tech_spec if s.tech_spec is not None else cur["tech_spec"], now(), pid))
+                   s.tech_spec if s.tech_spec is not None else cur["tech_spec"],
+                   json.dumps(s.endpoints if s.endpoints is not None else cur["endpoints"], ensure_ascii=False),
+                   json.dumps(s.fields if s.fields is not None else cur["fields"], ensure_ascii=False), now(), pid))
     return get_project(pid)["spec"]
+
+
+# ---------------------------------------------------------------- import existing service
+@app.post("/api/projects/import")
+def import_service(i: ImportIn):
+    """Reverse an existing SICF service into a project at the SPEC stage:
+    endpoint table + field table + PRD skeleton + tech spec, all marked as drafts."""
+    if not i.node and not i.clazz:
+        raise HTTPException(400, "請給 SICF 節點（node）或 handler class（clazz）")
+    try:
+        ex = extract(node=i.node, clazz=i.clazz, json_style=i.json_style)
+    except Exception as e:
+        raise HTTPException(502, f"抽取失敗（{type(e).__name__}）：{e}")
+    name = i.name or (i.node.rsplit("/", 1)[-1] or i.clazz).upper() + "（匯入）"
+    pid = uuid.uuid4().hex[:8]
+    origin = {"mode": "import", "source": ex["source"], "node": i.node, "class": i.clazz,
+              "handlers": [h["class"] for h in ex["raw"].get("handlers", [])], "stats": ex["stats"], "ts": now()}
+    with db() as c:
+        c.execute("INSERT INTO project(id,name,prd,glossary,stage,settings,created) VALUES(?,?,?,?,?,?,?)",
+                  (pid, name, ex["prd"], "", "spec", json.dumps({"baseline": True}, ensure_ascii=False), now()))
+        c.execute("INSERT INTO spec(project_id,openapi,feature,tech_spec,endpoints,fields,origin,updated) VALUES(?,?,?,?,?,?,?,?)",
+                  (pid, "", "", ex["tech_spec"], json.dumps(ex["endpoints"], ensure_ascii=False),
+                   json.dumps(ex["structs"], ensure_ascii=False), json.dumps(origin, ensure_ascii=False), now()))
+        c.execute("INSERT INTO gate(project_id,gate,status,who,note,ts) VALUES(?,?,?,?,?,?)",
+                  (pid, 1, "IMPORTED", "agent", f"從 {i.node or i.clazz} 反推：{ex['stats']['endpoints']} 端點、{ex['stats']['structs']} 結構（{ex['source']}）", now()))
+    emit("project", pid, {"stage": "spec"})
+    threading.Thread(target=generate_characterization, args=(pid,), daemon=True).start()
+    return get_project(pid)
+
+
+@app.get("/api/extract/preview")
+def extract_preview(node: str = "", clazz: str = "", json_style: str = "snake"):
+    """Dry run: show what the extractor would produce, without creating a project."""
+    ex = extract(node=node, clazz=clazz, json_style=json_style)
+    return {k: v for k, v in ex.items() if k != "raw"} | {"handlers": [h["class"] for h in ex["raw"].get("handlers", [])]}
+
+
+def generate_characterization(pid: str):
+    """Agent writes characterization scenarios (current behaviour) from the
+    reversed endpoint/field tables + tech spec. Marked @characterization."""
+    p = get_project(pid)
+    emit("spec", pid, {"status": "generating"})
+    system = ("你是 SAP 測試工程師。根據既有服務反推出的端點表、欄位表與 Tech Spec，"
+              "寫 Gherkin characterization 情境：描述『現在的行為』，不是期望行為。"
+              "每個端點至少：正常、404、400、403 各一條；寫入端點加一條驗 Z-table。每條加 tag @characterization。只輸出 feature 文字。")
+    user = json.dumps({"endpoints": p["spec"]["endpoints"], "fields": p["spec"]["fields"],
+                       "tech_spec": p["spec"]["tech_spec"]}, ensure_ascii=False)
+    try:
+        feature = llm.complete(system, user, purpose="characterize")
+    except Exception as e:
+        feature = f"# 產生失敗：{e}"
+    with db() as c:
+        c.execute("UPDATE spec SET feature=?,updated=? WHERE project_id=?", (feature, now(), pid))
+    emit("spec", pid, {"status": "ready"})
 
 
 PREV_STAGE = {"spec": "prd", "dev": "spec", "release": "dev", "done": "release"}
@@ -584,7 +661,11 @@ def events():
 
 @app.get("/api/config")
 def config():
-    return {"llm": llm.name, "executor": executor.name, "gates": GATE_NAMES, "stages": STAGES}
+    try:
+        ext = get_source().name
+    except Exception as e:
+        ext = f"unavailable ({e})"
+    return {"llm": llm.name, "executor": executor.name, "extractor": ext, "gates": GATE_NAMES, "stages": STAGES}
 
 
 # ---------------------------------------------------------------- samples / static

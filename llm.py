@@ -28,6 +28,8 @@ class MockLLM:
             return self._code(user)
         if purpose == "revise":
             return self._revise(user)
+        if purpose == "characterize":
+            return self._characterize(user)
         return "（mock LLM 回應）"
 
     # ---- spec: PRD -> openapi / feature / tech_spec ----
@@ -196,6 +198,42 @@ components:
     ...
   ENDMETHOD.
 ENDCLASS."""
+
+    def _characterize(self, ctx: str) -> str:
+        try:
+            d = json.loads(ctx)
+            eps = d.get("endpoints", [])
+        except Exception:
+            eps = []
+        out = ["Feature: 既有服務現況（characterization）",
+               "  描述目前的行為，含現有缺陷；PM 審時標出「現況錯、期望應為 X」的條目。", ""]
+        for e in eps:
+            m, pth = e.get("method", "GET"), e.get("path", "/")
+            pp = [p["name"] for p in e.get("params", []) if p["in"] == "path"]
+            ok_path = pth
+            for n in pp:
+                ok_path = ok_path.replace("{" + n + "}", "4500000001")
+            bad_path = pth
+            for n in pp:
+                bad_path = bad_path.replace("{" + n + "}", "4599999999")
+            fmt_path = pth
+            for n in pp:
+                fmt_path = fmt_path.replace("{" + n + "}", "ABC")
+            body = '，內容 {"text": "x"}' if e.get("body") else ""
+            out += [f"  @characterization", f"  Scenario: {m} {pth} 正常呼叫",
+                    f"    When 呼叫 {m} {ok_path}{body}", f"    Then 回應狀態碼為 {e.get('ok', '200')}"]
+            if e.get("resp"):
+                out += [f"    And 回應符合結構 {e['resp']}"]
+            out += [""]
+            for code, label, path in (("404", "資料不存在", bad_path), ("400", "格式錯誤", fmt_path)):
+                if code in (e.get("errors") or ""):
+                    out += [f"  @characterization", f"  Scenario: {m} {pth} {label}",
+                            f"    When 呼叫 {m} {path}{body}", f"    Then 回應狀態碼為 {code}", ""]
+            if "403" in (e.get("errors") or ""):
+                out += [f"  @characterization", f"  Scenario: {m} {pth} 無權限",
+                        f"    Given 呼叫者沒有授權 {e.get('auth') or '（見端點表）'}",
+                        f"    When 呼叫 {m} {ok_path}{body}", f"    Then 回應狀態碼為 403", ""]
+        return "\n".join(out)
 
     def _revise(self, ctx: str) -> str:
         return "修正：404 分支漏了 RETURN，導致繼續往下序列化空結構。已補上並調整 ABAP Unit 期望值。"

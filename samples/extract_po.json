@@ -1,0 +1,258 @@
+{
+ "node": "/sap/bc/zapi/po",
+ "handlers": [
+  {
+   "class": "ZCL_ZAPI_PO_HTTP",
+   "source": "CLASS zcl_zapi_po_http DEFINITION PUBLIC FINAL CREATE PUBLIC.\n  PUBLIC SECTION.\n    INTERFACES if_http_extension.\n    TYPES: BEGIN OF ty_item,\n             ebelp TYPE ebelp,\n             matnr TYPE matnr,\n             menge TYPE bstmg,\n             wemng TYPE wemng,\n             elikz TYPE elikz,\n           END OF ty_item,\n           ty_item_t TYPE STANDARD TABLE OF ty_item WITH DEFAULT KEY,\n           BEGIN OF ty_po_status,\n             ebeln  TYPE ebeln,\n             lifnr  TYPE lifnr,\n             bukrs  TYPE bukrs,\n             status TYPE c LENGTH 10,\n             items  TYPE ty_item_t,\n           END OF ty_po_status,\n           BEGIN OF ty_note_req,\n             text TYPE string,\n           END OF ty_note_req,\n           BEGIN OF ty_error,\n             error   TYPE string,\n             message TYPE string,\n           END OF ty_error.\n  PRIVATE SECTION.\n    METHODS get_po    IMPORTING iv_ebeln TYPE ebeln RETURNING VALUE(rs_po) TYPE ty_po_status RAISING zcx_po_not_found.\n    METHODS add_note  IMPORTING iv_ebeln TYPE ebeln is_req TYPE ty_note_req.\n    METHODS respond_error IMPORTING io_server TYPE REF TO if_http_server iv_code TYPE i iv_err TYPE string.\nENDCLASS.\n\nCLASS zcl_zapi_po_http IMPLEMENTATION.\n  METHOD if_http_extension~handle_request.\n    DATA(lv_method) = server->request->get_header_field( '~request_method' ).\n    DATA(lv_path)   = server->request->get_header_field( '~path_info' ).\n    DATA(lv_with_items) = server->request->get_form_field( 'with_items' ).\n    SPLIT lv_path AT '/' INTO TABLE DATA(lt_seg).\n    DELETE lt_seg WHERE table_line IS INITIAL.\n    DATA(lv_ebeln) = CONV ebeln( VALUE string( lt_seg[ 1 ] OPTIONAL ) ).\n    IF lv_ebeln NP '++++++++++' OR lv_ebeln CN '0123456789'.\n      respond_error( io_server = server iv_code = 400 iv_err = 'INVALID_EBELN' ).\n      RETURN.\n    ENDIF.\n    CASE lv_method.\n      WHEN 'GET'.\n        IF lv_path CP '/*'.\n          AUTHORITY-CHECK OBJECT 'M_BEST_EKO' ID 'ACTVT' FIELD '03' ID 'EKORG' DUMMY.\n          IF sy-subrc <> 0.\n            respond_error( io_server = server iv_code = 403 iv_err = 'NO_AUTH' ).\n            RETURN.\n          ENDIF.\n          TRY.\n              DATA(ls_po) = get_po( lv_ebeln ).\n            CATCH zcx_po_not_found.\n              respond_error( io_server = server iv_code = 404 iv_err = 'PO_NOT_FOUND' ).\n              RETURN.\n          ENDTRY.\n          server->response->set_status( code = 200 reason = 'OK' ).\n          server->response->set_cdata( /ui2/cl_json=>serialize( data = ls_po pretty_name = /ui2/cl_json=>pretty_mode-low_case ) ).\n        ENDIF.\n      WHEN 'POST'.\n        IF lv_path CP '/*/note'.\n          AUTHORITY-CHECK OBJECT 'M_BEST_EKO' ID 'ACTVT' FIELD '02' ID 'EKORG' DUMMY.\n          IF sy-subrc <> 0.\n            respond_error( io_server = server iv_code = 403 iv_err = 'NO_AUTH' ).\n            RETURN.\n          ENDIF.\n          DATA ls_req TYPE ty_note_req.\n          /ui2/cl_json=>deserialize( EXPORTING json = server->request->get_cdata( ) CHANGING data = ls_req ).\n          IF ls_req-text IS INITIAL OR strlen( ls_req-text ) > 255.\n            respond_error( io_server = server iv_code = 400 iv_err = 'INVALID_TEXT' ).\n            RETURN.\n          ENDIF.\n          SELECT SINGLE ebeln FROM ekko WHERE ebeln = @lv_ebeln INTO @DATA(lv_exists).\n          IF sy-subrc <> 0.\n            respond_error( io_server = server iv_code = 404 iv_err = 'PO_NOT_FOUND' ).\n            RETURN.\n          ENDIF.\n          add_note( iv_ebeln = lv_ebeln is_req = ls_req ).\n          server->response->set_status( code = 201 reason = 'Created' ).\n        ENDIF.\n      WHEN OTHERS.\n        server->response->set_status( code = 405 reason = 'Method Not Allowed' ).\n    ENDCASE.\n  ENDMETHOD.\n\n  METHOD get_po.\n    SELECT SINGLE ebeln, lifnr, bukrs, loekz FROM ekko WHERE ebeln = @iv_ebeln INTO @DATA(ls_ekko).\n    IF sy-subrc <> 0.\n      RAISE EXCEPTION TYPE zcx_po_not_found.\n    ENDIF.\n    rs_po-ebeln = ls_ekko-ebeln. rs_po-lifnr = ls_ekko-lifnr. rs_po-bukrs = ls_ekko-bukrs.\n    SELECT p~ebelp, p~matnr, p~menge, p~elikz, SUM( e~wemng ) AS wemng\n      FROM ekpo AS p LEFT OUTER JOIN eket AS e ON e~ebeln = p~ebeln AND e~ebelp = p~ebelp\n      WHERE p~ebeln = @iv_ebeln\n      GROUP BY p~ebelp, p~matnr, p~menge, p~elikz\n      INTO CORRESPONDING FIELDS OF TABLE @rs_po-items.\n    IF ls_ekko-loekz = 'L'.\n      rs_po-status = 'CLOSED'.\n    ELSEIF rs_po-items IS NOT INITIAL AND NOT line_exists( rs_po-items[ elikz = '' ] ).\n      rs_po-status = 'DELIVERED'.\n    ELSEIF line_exists( rs_po-items[ wemng > 0 ] ) OR line_exists( rs_po-items[ elikz = 'X' ] ).\n      rs_po-status = 'PARTIAL'.\n    ELSE.\n      rs_po-status = 'OPEN'.\n    ENDIF.\n  ENDMETHOD.\n\n  METHOD add_note.\n    SELECT MAX( seqno ) FROM zpo_note WHERE ebeln = @iv_ebeln INTO @DATA(lv_max).\n    DATA(ls_note) = VALUE zpo_note( ebeln = iv_ebeln seqno = lv_max + 1 note_text = is_req-text\n                                    ernam = sy-uname erdat = sy-datum erzet = sy-uzeit ).\n    INSERT zpo_note FROM @ls_note.\n    IF sy-subrc <> 0.\n      MESSAGE e012(zmm_bond) INTO DATA(lv_dummy).\n    ENDIF.\n  ENDMETHOD.\n\n  METHOD respond_error.\n    DATA(ls_err) = VALUE ty_error( error = iv_err message = iv_err ).\n    io_server->response->set_status( code = iv_code reason = 'Error' ).\n    io_server->response->set_cdata( /ui2/cl_json=>serialize( data = ls_err pretty_name = /ui2/cl_json=>pretty_mode-low_case ) ).\n  ENDMETHOD.\nENDCLASS.\n\n\" ===== LOCAL TEST CLASSES (CCAU) =====\nCLASS ltc_po_http DEFINITION FOR TESTING RISK LEVEL HARMLESS DURATION SHORT.\n  PRIVATE SECTION.\n    METHODS status_partial FOR TESTING.\n    METHODS invalid_ebeln  FOR TESTING.\nENDCLASS.\n",
+   "methods": [
+    "IF_HTTP_EXTENSION~HANDLE_REQUEST",
+    "GET_PO",
+    "ADD_NOTE",
+    "RESPOND_ERROR"
+   ],
+   "unit_tests": [
+    "LTC_PO_HTTP"
+   ],
+   "auth_checks": [
+    {
+     "object": "M_BEST_EKO",
+     "line": 47,
+     "actvt": "'03'"
+    },
+    {
+     "object": "M_BEST_EKO",
+     "line": 63,
+     "actvt": "'02'"
+    }
+   ],
+   "status_codes": [
+    {
+     "code": 200,
+     "line": 58
+    },
+    {
+     "code": 201,
+     "line": 80
+    },
+    {
+     "code": 405,
+     "line": 83
+    }
+   ],
+   "form_fields": [
+    "with_items"
+   ],
+   "header_fields": [
+    "~request_method",
+    "~path_info"
+   ],
+   "tables_read": [
+    "EKKO",
+    "EKPO",
+    "ZPO_NOTE"
+   ],
+   "tables_written": [
+    "ZPO_NOTE"
+   ],
+   "bapis": [],
+   "messages": [
+    {
+     "class": "ZMM_BOND",
+     "number": "012",
+     "line": 115
+    }
+   ],
+   "types": [
+    {
+     "name": "TY_ITEM",
+     "kind": "struct",
+     "fields": [
+      {
+       "name": "EBELP",
+       "type": "N",
+       "len": 5,
+       "dec": 0,
+       "ddic": "EBELP",
+       "label": "採購憑證項目"
+      },
+      {
+       "name": "MATNR",
+       "type": "C",
+       "len": 40,
+       "dec": 0,
+       "ddic": "MATNR",
+       "label": "物料"
+      },
+      {
+       "name": "MENGE",
+       "type": "P",
+       "len": 13,
+       "dec": 3,
+       "ddic": "BSTMG",
+       "label": "採購訂單數量"
+      },
+      {
+       "name": "WEMNG",
+       "type": "P",
+       "len": 13,
+       "dec": 3,
+       "ddic": "WEMNG",
+       "label": "已收貨數量"
+      },
+      {
+       "name": "ELIKZ",
+       "type": "C",
+       "len": 1,
+       "dec": 0,
+       "ddic": "ELIKZ",
+       "label": "交貨完成指標"
+      }
+     ]
+    },
+    {
+     "name": "TY_ITEM_T",
+     "kind": "table",
+     "line": "TY_ITEM"
+    },
+    {
+     "name": "TY_PO_STATUS",
+     "kind": "struct",
+     "fields": [
+      {
+       "name": "EBELN",
+       "type": "C",
+       "len": 10,
+       "dec": 0,
+       "ddic": "EBELN",
+       "label": "採購憑證"
+      },
+      {
+       "name": "LIFNR",
+       "type": "C",
+       "len": 10,
+       "dec": 0,
+       "ddic": "LIFNR",
+       "label": "供應商"
+      },
+      {
+       "name": "BUKRS",
+       "type": "C",
+       "len": 4,
+       "dec": 0,
+       "ddic": "BUKRS",
+       "label": "公司代碼"
+      },
+      {
+       "name": "STATUS",
+       "type": "C",
+       "len": 10,
+       "dec": 0,
+       "ddic": "",
+       "label": ""
+      },
+      {
+       "name": "ITEMS",
+       "type": "TY_ITEM_T",
+       "len": 0,
+       "dec": 0,
+       "ddic": "",
+       "label": ""
+      }
+     ]
+    },
+    {
+     "name": "TY_NOTE_REQ",
+     "kind": "struct",
+     "fields": [
+      {
+       "name": "TEXT",
+       "type": "STRING",
+       "len": 0,
+       "dec": 0,
+       "ddic": "",
+       "label": ""
+      }
+     ]
+    },
+    {
+     "name": "TY_ERROR",
+     "kind": "struct",
+     "fields": [
+      {
+       "name": "ERROR",
+       "type": "STRING",
+       "len": 0,
+       "dec": 0,
+       "ddic": "",
+       "label": ""
+      },
+      {
+       "name": "MESSAGE",
+       "type": "STRING",
+       "len": 0,
+       "dec": 0,
+       "ddic": "",
+       "label": ""
+      }
+     ]
+    }
+   ],
+   "ddic": [
+    {
+     "name": "ZPO_NOTE",
+     "kind": "struct",
+     "fields": [
+      {
+       "name": "EBELN",
+       "type": "C",
+       "len": 10,
+       "dec": 0,
+       "ddic": "EBELN",
+       "label": "採購憑證"
+      },
+      {
+       "name": "SEQNO",
+       "type": "N",
+       "len": 4,
+       "dec": 0,
+       "ddic": "ZSEQNO",
+       "label": "序號"
+      },
+      {
+       "name": "NOTE_TEXT",
+       "type": "C",
+       "len": 255,
+       "dec": 0,
+       "ddic": "ZNOTE_TEXT",
+       "label": "備註"
+      },
+      {
+       "name": "ERNAM",
+       "type": "C",
+       "len": 12,
+       "dec": 0,
+       "ddic": "ERNAM",
+       "label": "建立者"
+      },
+      {
+       "name": "ERDAT",
+       "type": "D",
+       "len": 8,
+       "dec": 0,
+       "ddic": "ERDAT",
+       "label": "建立日期"
+      },
+      {
+       "name": "ERZET",
+       "type": "T",
+       "len": 6,
+       "dec": 0,
+       "ddic": "ERZET",
+       "label": "建立時間"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

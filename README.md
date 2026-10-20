@@ -34,6 +34,31 @@ API：`POST /api/projects/{id}/rollback {who, note, to?}`。
 - **OpenAPI**：由端點表（paths）＋欄位表（schemas）生成，唯讀；ABAP TYPES 與路由骨架同樣生成。
 改欄位或端點＝改表、重生成；G2 之後要改須退回 G2。
 
+## 從既有服務匯入（brownfield）
+左欄「⇩ 從既有服務匯入」：填 SICF 節點或 handler class → 預覽 → 匯入。
+專案直接從「系統規格」開始，閘門紀錄為 `G1 IMPORTED`，並帶：
+- **端點表**：方法、路徑（路徑參數名從 `CONV ebeln( lt_seg[1] )` 推）、query 參數（`get_form_field`）、body / 回應結構、錯誤碼（`set_status` / `iv_code =`）、授權（`AUTHORITY-CHECK`）
+- **欄位表**：class 內 `TYPES` 與用到的 DDIC 結構，經 RTTI 展開；DDIC 有欄位說明的自動帶入，沒有的標 `?` 待 PM 補
+- **PRD 骨架**、**Tech Spec（反推）**：讀寫的表、BAPI、訊息、既有 ABAP Unit
+- **Gherkin `@characterization`**：描述現況行為（含現有缺陷），PM 審時標出「現況錯、期望應為 X」
+
+第一次迴圈用**基準模式**：只跑驗證不改程式，全綠即 baseline；之後的改動走正常流程。
+
+### 抽取來源（`EXTRACT_MODE`）
+| 值 | 來源 | 需要 |
+|---|---|---|
+| `mock`（預設） | `samples/extract_po.json` | 無，離線示範 |
+| `abap` | `abap/zcl_loop_extract_http.abap` 掛在 SICF（或當 MCP tool `read_sicf_service`） | `SAP_EXTRACT_URL`、`SAP_USER`、`SAP_PASS` |
+| `adt` | ADT REST `/sap/bc/adt/oo/classes/{c}/source/main` | `SAP_ADT_URL`、`SAP_USER`、`SAP_PASS`；只能給 class，TYPES 用文字解析、無 RTTI |
+
+ABAP 端一次回傳：class 原始碼（含 CCAU 測試 include）、methods、RTTI 展開的 TYPES / DDIC、
+AUTHORITY-CHECK、status code、form/header field、讀寫表、BAPI、message、unit test 清單。
+Python 端 `extractor.py` 的 `parse_dump()` 把它轉成端點表 / 欄位表草稿；`EXTRACT_MODE=adt` 時由
+`scan_source()` 在 Python 端做同樣的文字掃描。反推最常錯的是 `/ui2/cl_json` 欄位命名（`json_style`
+選 snake / camel）與 optional 欄位，G2 時請特別對。
+
+API：`GET /api/extract/preview?node=…|clazz=…`、`POST /api/projects/import {node|clazz, json_style, name?}`
+
 ## 迴圈（LOOP.md）
 每輪：Plan → Act → 寫入（經 G3）→ Verify（語法 / ABAP Unit / ATC / 情境）→ Revise。
 停止：全綠；連續 N 輪無進展（寫 BLOCKED）；回合上限。
@@ -60,6 +85,8 @@ API：`POST /api/projects/{id}/rollback {who, note, to?}`。
 app.py          FastAPI：專案、閘門、規格、迴圈執行緒、審批、SSE
 llm.py          MockLLM / GatewayLLM
 executor.py     MockSapExecutor / AbapHttpExecutor（Verify 永遠在迴圈外）
+extractor.py    既有服務抽取：Mock / AbapHttp / Adt 來源 + 反推端點表、欄位表
+abap/           ZCL_LOOP_EXTRACT_HTTP — SAP 端抽取 handler（SICF / MCP tool）
 static/index.html  單頁 UI
 samples/        範例 PRD、詞彙表、LOOP.md
 loop.db         SQLite（自動建立）
