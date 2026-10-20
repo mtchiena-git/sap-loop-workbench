@@ -94,6 +94,7 @@ svg text{font-family:var(--sans);font-size:11px;fill:var(--muted)}
   <h2>專案</h2>
   <div id="projects"></div>
   <button class="primary" style="width:100%;margin-top:8px" id="btnNew">＋ 新專案</button>
+  <button style="width:100%;margin-top:6px" id="btnImp">⇩ 從既有服務匯入</button>
   <h2>體驗提示</h2>
   <div class="tip">人只在 4 個閘門出手，其餘讓迴圈跑。<br><br>想看「迴圈會停」：啟動時選一條毒情境。<br>想看「人在控制」：審批模式選「每輪」，然後拒絕一次。</div>
   <div class="proto">Prototype：後端以頁內模擬取代，資料不會儲存。正式版為 FastAPI + SQLite，接內部 LLM gateway 與 ABAP BFF。</div>
@@ -318,6 +319,193 @@ const DEFAULT_FIELDS=()=>[
  {name:'Error',role:'錯誤回應 · 4xx',fields:[
   {label:'錯誤碼',name:'error',type:'enum',len:'',req:true,ex:'PO_NOT_FOUND',rule:'PO_NOT_FOUND/INVALID_EBELN/NO_AUTH/INVALID_TEXT'},
   {label:'訊息',name:'message',type:'string',len:'',req:false,ex:'採購單不存在',rule:''}]}];
+// ---------- extraction (port of extractor.py): ABAP handler source → endpoint / field table drafts
+const SAMPLE_ABAP=`CLASS zcl_zapi_po_http DEFINITION PUBLIC FINAL CREATE PUBLIC.
+  PUBLIC SECTION.
+    INTERFACES if_http_extension.
+    TYPES: BEGIN OF ty_item,
+             ebelp TYPE ebelp,
+             matnr TYPE matnr,
+             menge TYPE bstmg,
+             wemng TYPE wemng,
+             elikz TYPE elikz,
+           END OF ty_item,
+           ty_item_t TYPE STANDARD TABLE OF ty_item WITH DEFAULT KEY,
+           BEGIN OF ty_po_status,
+             ebeln  TYPE ebeln,
+             lifnr  TYPE lifnr,
+             bukrs  TYPE bukrs,
+             status TYPE c LENGTH 10,
+             items  TYPE ty_item_t,
+           END OF ty_po_status,
+           BEGIN OF ty_note_req,
+             text TYPE string,
+           END OF ty_note_req,
+           BEGIN OF ty_error,
+             error   TYPE string,
+             message TYPE string,
+           END OF ty_error.
+  PRIVATE SECTION.
+    METHODS get_po   IMPORTING iv_ebeln TYPE ebeln RETURNING VALUE(rs_po) TYPE ty_po_status RAISING zcx_po_not_found.
+    METHODS add_note IMPORTING iv_ebeln TYPE ebeln is_req TYPE ty_note_req.
+    METHODS respond_error IMPORTING io_server TYPE REF TO if_http_server iv_code TYPE i iv_err TYPE string.
+ENDCLASS.
+
+CLASS zcl_zapi_po_http IMPLEMENTATION.
+  METHOD if_http_extension~handle_request.
+    DATA(lv_method) = server->request->get_header_field( '~request_method' ).
+    DATA(lv_path)   = server->request->get_header_field( '~path_info' ).
+    DATA(lv_with_items) = server->request->get_form_field( 'with_items' ).
+    SPLIT lv_path AT '/' INTO TABLE DATA(lt_seg).
+    DELETE lt_seg WHERE table_line IS INITIAL.
+    DATA(lv_ebeln) = CONV ebeln( VALUE string( lt_seg[ 1 ] OPTIONAL ) ).
+    IF lv_ebeln NP '++++++++++' OR lv_ebeln CN '0123456789'.
+      respond_error( io_server = server iv_code = 400 iv_err = 'INVALID_EBELN' ).
+      RETURN.
+    ENDIF.
+    CASE lv_method.
+      WHEN 'GET'.
+        IF lv_path CP '/*'.
+          AUTHORITY-CHECK OBJECT 'M_BEST_EKO' ID 'ACTVT' FIELD '03' ID 'EKORG' DUMMY.
+          IF sy-subrc <> 0.
+            respond_error( io_server = server iv_code = 403 iv_err = 'NO_AUTH' ).
+            RETURN.
+          ENDIF.
+          TRY.
+              DATA(ls_po) = get_po( lv_ebeln ).
+            CATCH zcx_po_not_found.
+              respond_error( io_server = server iv_code = 404 iv_err = 'PO_NOT_FOUND' ).
+              RETURN.
+          ENDTRY.
+          server->response->set_status( code = 200 reason = 'OK' ).
+          server->response->set_cdata( /ui2/cl_json=>serialize( data = ls_po pretty_name = /ui2/cl_json=>pretty_mode-low_case ) ).
+        ENDIF.
+      WHEN 'POST'.
+        IF lv_path CP '/*/note'.
+          AUTHORITY-CHECK OBJECT 'M_BEST_EKO' ID 'ACTVT' FIELD '02' ID 'EKORG' DUMMY.
+          IF sy-subrc <> 0.
+            respond_error( io_server = server iv_code = 403 iv_err = 'NO_AUTH' ).
+            RETURN.
+          ENDIF.
+          DATA ls_req TYPE ty_note_req.
+          /ui2/cl_json=>deserialize( EXPORTING json = server->request->get_cdata( ) CHANGING data = ls_req ).
+          IF ls_req-text IS INITIAL OR strlen( ls_req-text ) > 255.
+            respond_error( io_server = server iv_code = 400 iv_err = 'INVALID_TEXT' ).
+            RETURN.
+          ENDIF.
+          SELECT SINGLE ebeln FROM ekko WHERE ebeln = @lv_ebeln INTO @DATA(lv_exists).
+          IF sy-subrc <> 0.
+            respond_error( io_server = server iv_code = 404 iv_err = 'PO_NOT_FOUND' ).
+            RETURN.
+          ENDIF.
+          add_note( iv_ebeln = lv_ebeln is_req = ls_req ).
+          server->response->set_status( code = 201 reason = 'Created' ).
+        ENDIF.
+      WHEN OTHERS.
+        server->response->set_status( code = 405 reason = 'Method Not Allowed' ).
+    ENDCASE.
+  ENDMETHOD.
+
+  METHOD get_po.
+    SELECT SINGLE ebeln, lifnr, bukrs, loekz FROM ekko WHERE ebeln = @iv_ebeln INTO @DATA(ls_ekko).
+    IF sy-subrc <> 0. RAISE EXCEPTION TYPE zcx_po_not_found. ENDIF.
+    SELECT p~ebelp, p~matnr, p~menge, p~elikz, SUM( e~wemng ) AS wemng
+      FROM ekpo AS p LEFT OUTER JOIN eket AS e ON e~ebeln = p~ebeln AND e~ebelp = p~ebelp
+      WHERE p~ebeln = @iv_ebeln GROUP BY p~ebelp, p~matnr, p~menge, p~elikz
+      INTO CORRESPONDING FIELDS OF TABLE @rs_po-items.
+  ENDMETHOD.
+
+  METHOD add_note.
+    SELECT MAX( seqno ) FROM zpo_note WHERE ebeln = @iv_ebeln INTO @DATA(lv_max).
+    INSERT zpo_note FROM @( VALUE #( ebeln = iv_ebeln seqno = lv_max + 1 note_text = is_req-text ernam = sy-uname ) ).
+    IF sy-subrc <> 0. MESSAGE e012(zmm_bond) INTO DATA(lv_dummy). ENDIF.
+  ENDMETHOD.
+
+  METHOD respond_error.
+    io_server->response->set_status( code = iv_code reason = 'Error' ).
+    io_server->response->set_cdata( /ui2/cl_json=>serialize( data = VALUE ty_error( error = iv_err message = iv_err ) ) ).
+  ENDMETHOD.
+ENDCLASS.
+
+" ===== LOCAL TEST CLASSES (CCAU) =====
+CLASS ltc_po_http DEFINITION FOR TESTING RISK LEVEL HARMLESS DURATION SHORT.
+  PRIVATE SECTION.
+    METHODS status_partial FOR TESTING.
+ENDCLASS.`;
+// DDIC knowledge the ABAP side would get from RTTI; the prototype carries a small dictionary
+const DDIC={EBELN:['string','10','採購憑證'],EBELP:['string','5','採購憑證項目'],MATNR:['string','40','物料'],LIFNR:['string','10','供應商'],BUKRS:['string','4','公司代碼'],BSTMG:['number','','採購訂單數量'],WEMNG:['number','','已收貨數量'],ELIKZ:['boolean','','交貨完成指標'],LOEKZ:['string','1','刪除旗標'],ERNAM:['string','12','建立者'],ERDAT:['string','8','建立日期'],ERZET:['string','6','建立時間'],MENGE:['number','','數量'],WERKS:['string','4','工廠'],LGORT:['string','4','儲存地點']};
+const ABAP_TYPE={C:'string',STRING:'string',N:'string',D:'string',T:'string',I:'integer',INT4:'integer',P:'number',F:'number',DEC:'number',ABAP_BOOL:'boolean',FLAG:'boolean',X:'string'};
+const pascal=n=>n.replace(/^TY_/i,'').toLowerCase().split('_').map(s=>s.charAt(0).toUpperCase()+s.slice(1)).join('');
+function scanAbap(src){const h={methods:[],unit_tests:[],auth:[],codes:[],form:[],header:[],read:[],written:[],bapis:[],messages:[],types:[]};const add=(k,v)=>{if(v&&!h[k].includes(v))h[k].push(v)};let cur=null;
+  src.split('\n').forEach((raw,i)=>{const line=i+1;const t=raw.trim();if(!t||t[0]==='*'||t[0]==='"')return;const u=t.toUpperCase();let m;
+    if(u.startsWith('METHOD ')&&!u.startsWith('METHODS'))add('methods',u.slice(7).replace(/\.$/,'').trim());
+    if((m=u.match(/^CLASS\s+(\w+).*FOR TESTING/)))add('unit_tests',m[1]);
+    if((m=u.match(/AUTHORITY-CHECK OBJECT '([^']+)'/)))h.auth.push({object:m[1],line,actvt:''});
+    if((m=u.match(/ID 'ACTVT' FIELD\s+'?(\w+)'?/))&&h.auth.length)h.auth[h.auth.length-1].actvt=m[1];
+    if((m=u.match(/SET_STATUS\(.*CODE\s*=\s*(\d{3})/))||(m=u.match(/\b(?:IV_|LV_)?CODE\s*=\s*(\d{3})\b/)))h.codes.push({code:+m[1],line});
+    for(const mm of u.matchAll(/GET_FORM_FIELD\(\s*'([^']+)'/g))add('form',mm[1].toLowerCase());
+    for(const mm of u.matchAll(/GET_HEADER_FIELD\(\s*'([^']+)'/g))add('header',mm[1].toLowerCase());
+    if((m=u.match(/\bFROM\s+(\w+)/))&&(u.includes('SELECT')||u.startsWith('FROM'))&&!u.includes('SCREEN'))add('read',m[1]);
+    if((m=u.match(/^(INSERT|UPDATE|MODIFY|DELETE)\s+(?:FROM\s+)?(Z\w+)/)))add('written',m[2]);
+    if((m=u.match(/CALL FUNCTION\s+'([^']+)'/)))add('bapis',m[1]);
+    if((m=u.match(/MESSAGE\s+[EWISAX](\d{3})\((\w+)\)/)))h.messages.push({cls:m[2],no:m[1],line});
+    // TYPES
+    const tt=t.replace(/[,.]\s*$/,'');
+    if((m=tt.match(/^(?:TYPES:?\s+)?BEGIN OF\s+(\w+)/i))){cur={name:m[1].toUpperCase(),kind:'struct',fields:[]};return}
+    if((m=tt.match(/^END OF\s+(\w+)/i))&&cur){h.types.push(cur);cur=null;return}
+    if((m=tt.match(/^(?:TYPES:?\s+)?(\w+)\s+TYPE\s+(?:STANDARD|SORTED|HASHED)?\s*TABLE OF\s+(\w+)/i))){h.types.push({name:m[1].toUpperCase(),kind:'table',line:m[2].toUpperCase()});return}
+    if(cur&&(m=tt.match(/^(\w+)\s+TYPE\s+(\w+)(?:\s+LENGTH\s+(\d+))?(?:\s+DECIMALS\s+(\d+))?/i))){const ty=m[2].toUpperCase();cur.fields.push({name:m[1].toUpperCase(),type:ty,len:m[3]||'',ddic:ABAP_TYPE[ty]?'':ty})}});
+  // DDIC tables written → structures (from the dictionary we know)
+  h.written.forEach(tb=>{if(tb==='ZPO_NOTE')h.types.push({name:'ZPO_NOTE',kind:'struct',ddic:true,fields:['EBELN','SEQNO','NOTE_TEXT','ERNAM','ERDAT','ERZET'].map(n=>({name:n,type:n==='NOTE_TEXT'?'C':'',len:n==='NOTE_TEXT'?'255':(n==='SEQNO'?'4':''),ddic:DDIC[n]?n:''}))})});
+  return h}
+function routesOf(src,prefix){const routes=[],seg={};let method=null;
+  src.split('\n').forEach(raw=>{const u=raw.trim().toUpperCase();let m;
+    if((m=u.match(/CONV\s+(\w+)\(.*?SEG\w*\[\s*(\d+)/)))seg[+m[2]]=m[1].toLowerCase();
+    if((m=u.match(/REQUEST_METHOD\W*=\W*'(GET|POST|PUT|PATCH|DELETE)'/))||(m=u.match(/\bWHEN\s+'(GET|POST|PUT|PATCH|DELETE)'/)))method=m[1];
+    if((m=u.match(/(?:PATH_INFO|PATH)\W*(?:CP|=|CS)\W*'(\/[^']*)'/))||(m=u.match(/\bWHEN\s+'(\/[^']*)'/))){let n=0;const segs=m[1].replace(/^\/|\/$/g,'').split('/').filter(Boolean).map(s=>(s==='*'||s==='+')?(n++,'{'+(seg[n]||('id'+(n>1?n:'')))+'}'):s.toLowerCase());routes.push({method:method||'GET',path:prefix+'/'+segs.join('/')})}});
+  const seen=new Set();return routes.filter(r=>{const k=r.method+' '+r.path;if(seen.has(k))return false;seen.add(k);return true})}
+function extractService(src,node,style){const cls=(src.match(/CLASS\s+(\w+)\s+DEFINITION/i)||[,'ZCL_UNKNOWN'])[1].toUpperCase();const h=scanAbap(src);
+  const tableLines={};h.types.filter(t=>t.kind==='table').forEach(t=>tableLines[t.name]=pascal(t.line));
+  const jn=n=>{const s=n.toLowerCase();return style==='camel'?s.split('_').map((p,i)=>i?p.charAt(0).toUpperCase()+p.slice(1):p).join(''):s};
+  const structs=h.types.filter(t=>t.kind==='struct').map(t=>({name:pascal(t.name),role:'反推自 '+t.name+(t.ddic?'（DDIC）':''),src:t.name,fields:t.fields.map(f=>{const d=DDIC[f.ddic]||DDIC[f.name];let type=ABAP_TYPE[f.type]||(d?d[0]:'string'),ref='';let len=f.len||(d?d[1]:'');
+    if(tableLines[f.type]){type='list of';ref=tableLines[f.type];len=''}else if(/^TY_/.test(f.type)){type='object';ref=pascal(f.type);len=''}
+    if(type!=='string')len='';return{label:d?d[2]:'',name:jn(f.name),type,len:String(len),req:true,ex:'',rule:'',ref,src:t.name+'-'+f.name+(f.ddic?' ('+f.ddic+')':'')}})}));
+  const prefix=node?'/'+node.replace(/\/$/,'').split('/').pop():'';
+  const routes=routesOf(src,prefix);if(!routes.length)routes.push({method:'GET',path:prefix+'/{id}'});
+  const errs=[...new Set(h.codes.filter(c=>c.code>=400&&c.code!==405).map(c=>c.code))].sort();
+  const oks=[...new Set(h.codes.filter(c=>c.code>=200&&c.code<300).map(c=>c.code))].sort();
+  const endpoints=routes.map(r=>{const pp=[...r.path.matchAll(/\{(\w+)\}/g)].map(m=>m[1]);const w=['POST','PUT','PATCH'].includes(r.method);
+    const params=pp.map(p=>({name:p,in:'path',type:'string',len:'',req:true,desc:'反推自 PATH_INFO'})).concat(h.form.filter(q=>!pp.includes(q)).map(q=>({name:q,in:'query',type:'string',len:'',req:false,desc:'反推自 get_form_field'})));
+    const body=w?(structs.find(s=>/REQ|IN|NOTE|CREATE/.test(s.src))||{}).name||'':'';const resp=!w?(structs.find(s=>/STATUS|RES|OUT|HEAD/.test(s.src))||{}).name||'':'';
+    const a=h.auth.find(x=>w?x.actvt.includes('02'):x.actvt.includes('03'))||h.auth[0];
+    return{method:r.method,path:r.path,summary:'反推自 '+cls,params,body,ok:String(oks.length?(w?Math.max(...oks):Math.min(...oks)):(w?201:200)),resp,errors:errs.join(',')||'400,403,404',auth:a?`${a.object} ACTVT ${a.actvt}`:'',src:cls}});
+  const tech=`# Tech Spec（反推）\n\n## ${cls}\n- SICF：${node||'（未指定）'}\n- 方法：${h.methods.join(', ')}\n- 讀取表：${h.read.join(', ')||'-'}\n- 寫入表：${h.written.join(', ')||'-'}\n- BAPI / FM：${h.bapis.join(', ')||'-'}\n- 授權：${h.auth.map(a=>a.object+' '+a.actvt).join(', ')||'-'}\n- 訊息：${h.messages.map(m=>m.cls+' '+m.no).join(', ')||'-'}\n- 既有 ABAP Unit：${h.unit_tests.join(', ')||'無'}`;
+  const prd=`# PRD（反推骨架，請 PM 補業務意義）\n\n## 1. 背景\n既有服務 ${node||cls} 匯入。以下由程式反推，**業務意義、使用者、不回傳清單**需由 PM 補齊。\n\n## 2. 目標（現況能力）\n${endpoints.map(e=>`- ${['POST','PUT','PATCH'].includes(e.method)?'寫入':'查詢'}：${e.method} ${e.path}（由 ${cls} 提供）`).join('\n')}\n\n## 3. 使用者\n（PM 補）\n\n## 4. 範圍\n- 現況基準：先讓 characterization 情境全綠，再談改動\n\n## 5. 業務規則\n（PM 補；程式中的規則見 Tech Spec 的訊息與授權）\n\n## 6. 資料需求\n見欄位表（反推自 TYPES / DDIC；業務名與規則欄留空待補）\n\n## 7. 驗收條件\n第一輪＝現況行為；PM 標出「現況錯、期望應為 X」的項目即為第一個變更需求`;
+  return{cls,endpoints,structs,tech,prd,stats:{endpoints:endpoints.length,structs:structs.length,methods:h.methods.length,tests:h.unit_tests.length}}}
+function characterize(eps){const out=['Feature: 既有服務現況（characterization）','  描述目前的行為，含現有缺陷；PM 審時標出「現況錯、期望應為 X」的條目。',''];
+  eps.forEach(e=>{const pp=e.params.filter(p=>p.in==='path').map(p=>p.name);const sub=v=>pp.reduce((s,n)=>s.replace('{'+n+'}',v),e.path);const body=e.body?'，內容 {"text": "x"}':'';
+    out.push('  @characterization',`  Scenario: ${e.method} ${e.path} 正常呼叫`,`    When 呼叫 ${e.method} ${sub('4500000001')}${body}`,`    Then 回應狀態碼為 ${e.ok}`);if(e.resp)out.push(`    And 回應符合結構 ${e.resp}`);out.push('');
+    [['404','資料不存在','4599999999'],['400','格式錯誤','ABC']].forEach(([c,l,v])=>{if((e.errors||'').includes(c))out.push('  @characterization',`  Scenario: ${e.method} ${e.path} ${l}`,`    When 呼叫 ${e.method} ${sub(v)}${body}`,`    Then 回應狀態碼為 ${c}`,'')});
+    if((e.errors||'').includes('403'))out.push('  @characterization',`  Scenario: ${e.method} ${e.path} 無權限`,`    Given 呼叫者沒有授權 ${e.auth||'（見端點表）'}`,`    When 呼叫 ${e.method} ${sub('4500000001')}${body}`,'    Then 回應狀態碼為 403','')});
+  return out.join('\n')}
+function importProject(){const node=$('#impNode').value.trim(),src=$('#impSrc').value.trim(),style=$('#impStyle').value;if(!src)return toast('請貼 handler 原始碼或載入範例');
+  const ex=extractService(src,node,style);const name=(node?node.split('/').pop().toUpperCase():ex.cls)+'（匯入）';
+  const p={id:uid(),name,prd:ex.prd,glossary:'',stage:'spec',spec:{openapi:'',feature:'',tech_spec:ex.tech,fields:ex.structs,endpoints:ex.endpoints,frozen:false,generating:true,origin:{node,cls:ex.cls,source:'mock（頁內解析）',stats:ex.stats,style}},gates:[{gate:1,status:'IMPORTED',who:'agent',note:`從 ${node||ex.cls} 反推：${ex.stats.endpoints} 端點、${ex.stats.structs} 結構、${ex.stats.tests} 個既有 Unit test`,ts:now()}],runs:[],approvals:[],notes:[],created:now(),baseline:true};
+  syncSpecFromFields(p);S.projects.unshift(p);S.cur=p.id;S.tab='endpoints';S.esel=0;S.fsel=0;S.imp=false;render();
+  setTimeout(()=>{p.spec.feature=characterize(p.spec.endpoints);p.spec.generating=false;render();toast(`agent 已寫 ${parseScenarios(p.spec.feature).length} 條 characterization 情境`)},1400)}
+function importCard(){if(!S.imp)return '';const pv=S.impPreview;return `<div class="card" style="border-color:var(--accent)"><div class="row"><h3 class="grow" style="margin:0">⇩ 從既有服務匯入（走 MCP / ADT）</h3><button class="sm" id="btnImpClose">關閉</button></div>
+  <div class="small muted" style="margin:6px 0 8px">正式版由 ZCL_LOOP_EXTRACT_HTTP 讀 SICF 節點回傳原始碼 + RTTI 展開的 TYPES；prototype 在頁內解析貼上的 handler 原始碼。反推結果是草稿，G2 時開發審端點表、PM 補欄位業務名。</div>
+  <div class="row" style="margin-bottom:6px"><input id="impNode" placeholder="SICF 節點，如 /sap/bc/zapi/po" value="/sap/bc/zapi/po" style="flex:1;min-width:200px"><select id="impStyle" style="width:auto"><option value="snake">JSON 欄位 snake_case（/ui2/cl_json low_case）</option><option value="camel">JSON 欄位 camelCase</option></select><button class="sm" id="btnImpSample">載入範例 handler</button></div>
+  <textarea id="impSrc" placeholder="貼上 handler class 原始碼（DEFINITION + IMPLEMENTATION，可含 CCAU）" style="min-height:200px">${esc(S.impSrc||'')}</textarea>
+  <div class="row" style="margin-top:8px"><button id="btnImpPreview">預覽反推結果</button><button class="primary" id="btnImpGo">匯入為專案</button></div>
+  ${pv?`<div style="margin-top:10px"><div class="small muted">class ${esc(pv.cls)} · ${pv.stats.methods} 個方法 · ${pv.stats.tests} 個 Unit test · 端點 ${pv.stats.endpoints} · 結構 ${pv.stats.structs}</div>
+    <div class="tw" style="margin-top:6px"><table><tr><th>方法</th><th>路徑</th><th>參數</th><th>Body</th><th>回應</th><th>錯誤碼</th><th>授權</th></tr>${pv.endpoints.map(e=>`<tr><td><code>${e.method}</code></td><td><code>${esc(e.path)}</code></td><td class="small">${e.params.map(p=>esc(p.name)+'<span class="muted">:'+p.in+'</span>').join(', ')||'—'}</td><td>${esc(e.body)||'—'}</td><td>${e.ok} → ${esc(e.resp)||'—'}</td><td class="small">${esc(e.errors)}</td><td class="small">${esc(e.auth)}</td></tr>`).join('')}</table></div>
+    <div class="small" style="margin-top:6px">${pv.structs.map(s=>`<b>${esc(s.name)}</b> <span class="muted">${esc(s.role)}</span>：${s.fields.map(f=>(f.label?'':'<span class="badge warn" title="業務名待補">?</span>')+'<code>'+esc(f.name)+'</code>').join(' ')}`).join('<br>')}</div></div>`:''}</div>`}
+function bindImport(){const q=(id,fn)=>{const e=document.getElementById(id);if(e)e.onclick=fn};const keep=()=>{const t=$('#impSrc');if(t)S.impSrc=t.value};
+  q('btnImpClose',()=>{keep();S.imp=false;render()});q('btnImpSample',()=>{S.impSrc=SAMPLE_ABAP;S.impPreview=null;render()});
+  q('btnImpPreview',()=>{keep();if(!S.impSrc)return toast('請貼原始碼或載入範例');S.impPreview=extractService(S.impSrc,$('#impNode').value.trim(),$('#impStyle').value);render()});
+  q('btnImpGo',()=>{keep();importProject()});const t=$('#impSrc');if(t)t.oninput=keep}
+
 // endpoint table: methods / paths / inputs live here, not in the PRD
 const METHODS=['GET','POST','PUT','PATCH','DELETE'];
 const DEFAULT_ENDPOINTS=()=>[
@@ -394,7 +582,7 @@ function syncSpecFromFields(p){p.spec.openapi=genYaml(p.spec.fields,p.spec.endpo
 function fieldsTab(p){const s=p.spec;const ro=s.frozen;const st=s.fields;const cur=st[S.fsel]||st[0];if(!cur)return '<div class="muted">尚無結構</div>';
   const refOpts=sel=>st.map(x=>`<option ${x.name===sel?'selected':''}>${esc(x.name)}</option>`).join('');
   const rows=cur.fields.map((f,i)=>`<tr>
-    <td><input data-fi="${i}" data-k="label" value="${esc(f.label)}" ${ro?'readonly':''}></td>
+    <td><div class="row" style="gap:4px;flex-wrap:nowrap">${!f.label&&f.src?'<span class="badge warn" title="業務名待補">?</span>':''}<input data-fi="${i}" data-k="label" value="${esc(f.label)}" ${ro?'readonly':''} placeholder="${f.src?'待 PM 補':''}"></div>${f.src?`<div class="small muted" style="font-family:var(--mono);font-size:10.5px">${esc(f.src)}</div>`:''}</td>
     <td><input data-fi="${i}" data-k="name" value="${esc(f.name)}" style="font-family:var(--mono)" ${ro?'readonly':''}></td>
     <td><div class="row" style="gap:4px;flex-wrap:nowrap"><select data-fi="${i}" data-k="type" ${ro?'disabled':''}>${TYPES.map(t=>`<option ${f.type===t?'selected':''}>${t}</option>`).join('')}</select>${['list of','object'].includes(f.type)?`<select data-fi="${i}" data-k="ref" ${ro?'disabled':''}>${refOpts(f.ref)}</select>`:f.type==='string'?`<input data-fi="${i}" data-k="len" value="${esc(f.len)}" placeholder="長度" style="width:56px" ${ro?'readonly':''}>`:''}</div></td>
     <td style="text-align:center"><input type="checkbox" data-fi="${i}" data-k="req" ${f.req?'checked':''} ${ro?'disabled':''} style="width:auto"></td>
@@ -513,7 +701,7 @@ function decide(id,approve){const p=cp();const a=p.approvals.find(x=>x.id===id);
 function render(){renderProjects();renderMain();renderApprovals();renderNotes()}
 function renderProjects(){$('#projects').innerHTML=S.projects.map(p=>`<div class="proj ${p.id===S.cur?'active':''}" data-id="${p.id}"><span class="grow" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(p.name)}</span><span class="badge">${stageName(p.stage)}</span></div>`).join('')||'<div class="small muted">尚無專案</div>';
   document.querySelectorAll('.proj').forEach(el=>el.onclick=()=>{S.cur=el.dataset.id;S.openIt=null;render()})}
-function renderMain(){const p=cp();if(!p){$('#main').innerHTML='<div class="card"><h3>開始</h3><div class="muted">按左欄「＋ 新專案」，會載入範例 PRD（採購單狀態查詢 API），然後依序走 4 個閘門。</div></div>';return}
+function renderMain(){const p=cp();if(!p||S.imp){$('#main').innerHTML=importCard()+(p?'':'<div class="card"><h3>開始</h3><div class="muted">按左欄「＋ 新專案」會載入範例 PRD；「⇩ 從既有服務匯入」則從 handler 原始碼反推規格，專案直接從系統規格開始。</div></div>');bindImport();return}
   const idx=STAGES.findIndex(s=>s[0]===p.stage);const g=n=>p.gates.some(x=>x.gate===n&&x.status==='APPROVED');
   const r=currentRun(p);
   let pipe='';STAGES.forEach((s,i)=>{pipe+=`<div class="stage ${i<idx?'past':i===idx?'cur':''}">${s[1]}</div>`;if(i<4){const n=i+1;const wait=n===3?(r&&r.status==='waiting_approval'):(idx===n-1);pipe+=`<div class="g ${g(n)?'ok':wait?'wait':''}" title="${GATES[n]}">G${n}</div>`}});
@@ -528,7 +716,8 @@ function renderStage(p){switch(p.stage){
     <div class="row" style="margin-bottom:6px"><b class="grow">PRD</b><button class="sm" id="btnSamplePrd">載入範本</button></div><textarea id="prd">${esc(p.prd)}</textarea>
     <div class="row" style="margin:10px 0 6px"><b class="grow">業務詞彙表</b><button class="sm" id="btnSampleGloss">載入範本</button></div><textarea id="glossary" class="short">${esc(p.glossary)}</textarea></div>
     ${gateCard(1,'PRD 定稿：PM + 開發 + Key User 開 Three Amigos，把驗收條件改成 Given/When/Then 後通過。通過後 agent 自動產生系統規格。')}`;
-  case 'spec':{const s=p.spec;const tabs={endpoints:'端點表',fields:'欄位表',feature:'Gherkin 情境',openapi:'OpenAPI（生成）',tech_spec:'Tech Spec'};const sc=parseScenarios(s.feature);const derived=S.tab==='openapi';return `<div class="card"><h3>階段 1 · 系統規格（agent 產生，人審）</h3>
+  case 'spec':{const s=p.spec;const tabs={endpoints:'端點表',fields:'欄位表',feature:'Gherkin 情境',openapi:'OpenAPI（生成）',tech_spec:'Tech Spec'};const sc=parseScenarios(s.feature);const derived=S.tab==='openapi';const o=s.origin;return `<div class="card"><h3>階段 1 · 系統規格（agent 產生，人審）</h3>
+    ${o?`<div class="banner" style="border-color:var(--accent);background:color-mix(in srgb,var(--accent) 9%,var(--panel))"><b>從既有服務匯入</b> · ${esc(o.node||o.cls)} · handler ${esc(o.cls)} · 來源 ${esc(o.source)}<br><span class="small muted">端點表與欄位表是反推草稿（欄位標 <span class="badge warn">?</span> 代表業務名待 PM 補）。Gherkin 為 characterization：描述現況行為，審時標出「現況錯、期望應為 X」的條目。G2 通過後第一次迴圈請用基準模式。</span></div>`:''}
     ${s.generating?'<div class="banner warn">agent 產生中…（正式版走 gateway 約 30–90 秒）</div>':''}
     <div class="tabs">${Object.keys(tabs).map(t=>`<div class="tab ${S.tab===t?'on':''}" data-tab="${t}">${tabs[t]}</div>`).join('')}</div>
     ${S.tab==='endpoints'?(s.endpoints.length?endpointsTab(p):'<div class="muted">等 agent 產生…</div>'):S.tab==='fields'?(s.fields.length?fieldsTab(p):'<div class="muted">等 agent 產生…</div>'):`<textarea id="specText" style="min-height:340px" ${s.frozen||derived?'readonly':''}>${esc(s[S.tab])}</textarea>
@@ -551,6 +740,7 @@ function renderDev(p,ro){const run=currentRun(p);const isRun=running(run);const 
       <label class="f">回合上限<input id="maxIter" type="number" value="20" style="width:70px"></label>
       <label class="f">無進展上限<input id="npl" type="number" value="3" style="width:64px"></label>
       <label class="f">寫入審批<select id="appMode"><option value="first">第一輪（建物件時）</option><option value="every">每輪</option><option value="auto">自動（示範用）</option></select></label>
+      ${p.baseline?`<label class="f">模式<select id="loopMode"><option value="baseline">基準（只驗證，不改程式）</option><option value="change">改動</option></select></label>`:''}
       <label class="f">毒情境<select id="poison"><option value="">無</option>${scen.map(s=>`<option>${esc(s)}</option>`).join('')}</select></label>
       <label class="f">每輪秒數<input id="spi" type="number" value="1.5" step="0.5" style="width:64px"></label>
       <button class="primary" id="btnStart">▶ 啟動迴圈</button>${p.spec.frozen?'<button class="sm" id="btnUnfreeze">解凍規格（回閘門 2）</button>':''}</div>
@@ -596,7 +786,7 @@ function renderApprovals(){const p=cp();const a=p?p.approvals.filter(x=>x.status
     <div class="row"><button class="primary" data-ap="${x.id}" data-ok="1">核准寫入</button><button class="danger" data-ap="${x.id}" data-ok="0">拒絕</button></div></div>`).join(''):'<span class="small muted">無</span>';
   document.querySelectorAll('[data-ap]').forEach(b=>b.onclick=()=>decide(b.dataset.ap,b.dataset.ok==='1'))}
 function renderNotes(){const p=cp();$('#notes').innerHTML=(p?p.notes:[]).map(n=>`<div class="note"><b>${esc(n.role)}</b>${esc(n.text)}<div class="small muted">${n.ts.slice(5,16)}</div></div>`).join('')||'<span class="small muted">觀察員在這裡記「如果是我會怎麼做、agent 做了什麼不一樣」</span>'}
-$('#btnNew').onclick=newProject;
+$('#btnNew').onclick=newProject;$('#btnImp').onclick=()=>{S.imp=true;render()};
 $('#noteText').onkeydown=e=>{if(e.key!=='Enter')return;const p=cp();if(!p)return toast('先選專案');const t=$('#noteText').value.trim();if(!t)return;p.notes.push({role:$('#noteRole').value,text:t,ts:now()});$('#noteText').value='';renderNotes()};
 newProject();
 </script>
