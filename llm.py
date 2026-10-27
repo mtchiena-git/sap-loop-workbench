@@ -185,7 +185,11 @@ components:
         return "本輪只做一件事：針對目前失敗的第一條情境修正 handler；先跑測試確認失敗再改程式。"
 
     def _code(self, ctx: str) -> str:
-        return """CLASS zcl_zapi_po_http IMPLEMENTATION.
+        try:
+            n = json.loads(ctx.split("\n", 1)[1]).get("iteration", 1)
+        except Exception:
+            n = 1
+        handler = """CLASS zcl_zapi_po_http IMPLEMENTATION.
   METHOD if_http_extension~handle_request.
     DATA(lv_path) = server->request->get_header_field( '~path_info' ).
     SPLIT lv_path AT '/' INTO TABLE DATA(lt_seg).
@@ -196,6 +200,60 @@ components:
       RETURN.
     ENDIF.
     ...
+  ENDMETHOD.
+ENDCLASS."""
+        if n > 1:
+            return handler
+        return handler + """
+
+" ===== LOCAL TEST CLASSES (CCAU include) — 與 handler 同批產生，G3 一起審 =====
+CLASS ltc_po_status DEFINITION FOR TESTING RISK LEVEL HARMLESS DURATION SHORT.
+  PRIVATE SECTION.
+    CLASS-DATA go_osql TYPE REF TO cl_osql_test_environment.
+    DATA mo_cut TYPE REF TO zcl_po_status_srv.
+    CLASS-METHODS class_setup.
+    CLASS-METHODS class_teardown.
+    METHODS setup.
+    METHODS given_item10_received_when_status_then_partial FOR TESTING.
+    METHODS given_all_elikz_when_status_then_delivered     FOR TESTING.
+    METHODS given_unknown_po_when_get_then_not_found       FOR TESTING.
+ENDCLASS.
+
+CLASS ltc_po_status IMPLEMENTATION.
+  METHOD class_setup.
+    go_osql = cl_osql_test_environment=>create( VALUE #( ( 'EKKO' ) ( 'EKPO' ) ( 'EKET' ) ( 'ZPO_NOTE' ) ) ).
+  ENDMETHOD.
+  METHOD class_teardown.
+    go_osql->destroy( ).
+  ENDMETHOD.
+  METHOD setup.
+    go_osql->clear_doubles( ).
+    mo_cut = NEW #( ).
+  ENDMETHOD.
+
+  METHOD given_item10_received_when_status_then_partial.
+    go_osql->insert_test_data( VALUE ekko_tab( ( ebeln = '4500000001' lifnr = 'V-TEST-01' bukrs = '1000' ) ) ).
+    go_osql->insert_test_data( VALUE ekpo_tab( ( ebeln = '4500000001' ebelp = '00010' menge = 100 elikz = 'X' )
+                                                ( ebeln = '4500000001' ebelp = '00020' menge = 50 ) ) ).
+    go_osql->insert_test_data( VALUE eket_tab( ( ebeln = '4500000001' ebelp = '00010' wemng = 100 ) ) ).
+    DATA(ls_po) = mo_cut->get_status( '4500000001' ).
+    cl_abap_unit_assert=>assert_equals( act = ls_po-status exp = 'PARTIAL' msg = 'Scenario: 查詢存在的採購單' ).
+    cl_abap_unit_assert=>assert_equals( act = lines( ls_po-items ) exp = 2 ).
+  ENDMETHOD.
+
+  METHOD given_all_elikz_when_status_then_delivered.
+    go_osql->insert_test_data( VALUE ekko_tab( ( ebeln = '4500000002' ) ) ).
+    go_osql->insert_test_data( VALUE ekpo_tab( ( ebeln = '4500000002' ebelp = '00010' elikz = 'X' ) ) ).
+    cl_abap_unit_assert=>assert_equals( act = mo_cut->get_status( '4500000002' )-status exp = 'DELIVERED'
+                                        msg = 'Scenario: 全數收貨的採購單狀態' ).
+  ENDMETHOD.
+
+  METHOD given_unknown_po_when_get_then_not_found.
+    TRY.
+        mo_cut->get_status( '4599999999' ).
+        cl_abap_unit_assert=>fail( 'expected zcx_po_not_found' ).
+      CATCH zcx_po_not_found.
+    ENDTRY.
   ENDMETHOD.
 ENDCLASS."""
 

@@ -3,12 +3,18 @@
 讓同仁真實體驗 AI Agent 迴圈：PRD → 系統規格 → 開發/測試迴圈 → 放行，人只在 4 個閘門出手。
 FastAPI + SQLite + vanilla JS，無 build tools、無 CDN（Menlo 友善）。
 
-## 啟動
+## 快速開始
+```powershell
+git clone https://github.com/mtchiena-git/sap-loop-workbench.git
+cd sap-loop-workbench
+python -m venv .venv ; .\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy .env.example .env
+.\run.ps1            # Linux/macOS: ./run.sh
 ```
-pip install fastapi uvicorn
-uvicorn app:app --host 0.0.0.0 --port 8080
-```
-開 http://localhost:8080 ，按「＋ 新專案」會自動載入範例 PRD 與詞彙表。
+開 http://127.0.0.1:8080 ，按「＋ 新專案」會自動載入範例 PRD 與詞彙表。
+用 Claude Code 安裝：在專案目錄開 `claude`，說「照 CLAUDE.md 把這個平台裝起來並啟動」即可。
+`prototype/index.html` 可直接用瀏覽器打開，不需後端。
 
 預設 **mock 模式**：LLM 與 SAP executor 都是模擬，不碰 D01，迴圈會「看起來」逐輪收斂，
 可以先拿來跑體驗工作坊。
@@ -58,6 +64,10 @@ Python 端 `extractor.py` 的 `parse_dump()` 把它轉成端點表 / 欄位表�
 選 snake / camel）與 optional 欄位，G2 時請特別對。
 
 API：`GET /api/extract/preview?node=…|clazz=…`、`POST /api/projects/import {node|clazz, json_style, name?}`
+
+## ABAP Unit 在迴圈裡怎麼來
+agent 與 handler 同批產生 local test class（CCAU），G3 一起審；規則在 `samples/LOOP.md`，
+tool 契約在 `executor.py` 的 `ABAP_UNIT_CONTRACT`，完整說明見 [docs/abap-unit-in-loop.md](docs/abap-unit-in-loop.md)。
 
 ## 迴圈（LOOP.md）
 每輪：Plan → Act → 寫入（經 G3）→ Verify（語法 / ABAP Unit / ATC / 情境）→ Revise。

@@ -16,6 +16,49 @@ import random
 import urllib.request
 
 
+ABAP_UNIT_CONTRACT = """
+/tools/abap_unit — run the local test classes of one or more classes.
+
+Request  {"class": "ZCL_ZAPI_PO_HTTP"}  or  {"classes": [...], "risk_level": "HARMLESS", "duration": "SHORT"}
+
+The BFF implements it with ADT (no extra SAP objects needed):
+  POST {SAP}/sap/bc/adt/abapunit/testruns
+  Content-Type: application/vnd.sap.adt.abapunit.testruns.result.v1+xml  (request body below)
+  <?xml version="1.0" encoding="UTF-8"?>
+  <aunit:runConfiguration xmlns:aunit="http://www.sap.com/adt/aunit">
+    <external><coverage active="false"/></external>
+    <options>
+      <uriType value="semantic"/>
+      <testDeterminationStrategy sameProgram="true" assignedTests="false" appendAssignedTestsPreview="true"/>
+      <testRiskLevels harmless="true" dangerous="false" critical="false"/>
+      <testDurations short="true" medium="false" long="false"/>
+    </options>
+    <adtcore:objectSets xmlns:adtcore="http://www.sap.com/adt/core">
+      <objectSet kind="inclusive">
+        <adtcore:objectReferences>
+          <adtcore:objectReference adtcore:uri="/sap/bc/adt/oo/classes/zcl_zapi_po_http"/>
+        </adtcore:objectReferences>
+      </objectSet>
+    </adtcore:objectSets>
+  </aunit:runConfiguration>
+  (needs CSRF: GET any ADT URL with X-CSRF-Token: Fetch first, reuse cookie + token.)
+  Alternative without ADT: ABAP report calling CL_AUNIT_API / CL_SAUNIT_INTERNAL_RT_RUN.
+
+Response XML: <aunit:runResult> → <program> → <testClasses> → <testClass name> → <testMethods>
+  → <testMethod name executionTime unit> with <alerts><alert kind="failedAssertion|exception|warning" severity>
+  <title>…</title><details><detail text/></details><stack>…</stack></alert></alerts>
+  A method with no alert (or only severity="tolerable") passed.
+
+BFF normalises it to:
+  {"passed": 7, "total": 9, "classes": ["ZCL_ZAPI_PO_HTTP"],
+   "failures": [{"test_class": "LTC_PO_STATUS", "method": "GIVEN_ITEM10_RECEIVED_WHEN_STATUS_THEN_PARTIAL",
+                 "kind": "failedAssertion", "title": "...", "detail": "act=OPEN exp=PARTIAL", "line": 42}],
+   "skipped_risk": 0,            # methods not run because risk level > HARMLESS (loop rejects > 0 at G3)
+   "duration_ms": 1830}
+The loop treats total == 0 as a failure: every handler must ship with tests.
+"""
+
+
 class VerifyResult(dict):
     """Keys: syntax_ok, unit_pass, unit_total, atc_p1, atc_p2,
     scen_pass, scen_total, failures[list of {scenario, expected, actual}]"""
@@ -86,9 +129,9 @@ class AbapHttpExecutor:
 
     def verify(self, iteration: int, scenarios: list, state: dict) -> VerifyResult:
         # Expected BFF contract (adjust to your MCP tools):
-        #   POST /tools/syntax_check  {objects:[...]}      -> {ok:bool}
-        #   POST /tools/abap_unit     {class:...}          -> {passed:int,total:int}
-        #   POST /tools/atc           {package:...}        -> {p1:int,p2:int}
+        #   POST /tools/syntax_check  {objects:[...]}      -> {ok:bool, messages:[...]}
+        #   POST /tools/abap_unit     {class:...}          -> see ABAP_UNIT_CONTRACT below
+        #   POST /tools/atc           {package:...}        -> {p1:int,p2:int,findings:[...]}
         #   POST /tools/run_feature   {feature:...}        -> {passed:int,total:int,failures:[...]}
         syn = self._post("/tools/syntax_check", {"objects": state.get("objects", [])})
         unit = self._post("/tools/abap_unit", {"class": state.get("test_class")})

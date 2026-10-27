@@ -23,3 +23,11 @@
 
 ## 卡住時
 寫 BLOCKED.md：卡住的情境、期望值、實際值、你的判斷（規格錯還是程式錯），然後停。
+
+## ABAP Unit（每輪必做）
+- 每個新增或修改的 method 都要有對應的 test method，命名 `given_<前提>_when_<動作>_then_<結果>`
+- 測試寫在 class 的 local test class（CCAU include），不建獨立全域 class
+- `RISK LEVEL HARMLESS DURATION SHORT`，其他 risk level 一律不接受
+- DB 存取用 `cl_osql_test_environment` 隔離（EKKO / EKPO / EKET / Z-table），介面呼叫用 `cl_abap_testdouble`；測試不准真的寫表
+- 一條 Gherkin 業務規則對一個 test method；HTTP 層由 API 情境驗，規則層由 ABAP Unit 驗
+- Verify 順序：語法 → ABAP Unit → ATC → API 情境；ABAP Unit 不綠不進 ATC
